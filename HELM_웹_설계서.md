@@ -12,7 +12,7 @@
 - 확정하는 것: 서버 구조, DB 스키마, 좌표계 규약, 팀원 간 연동 규격(메시지 포맷), 화면 구성, 구현 순서
 - 확정하지 않는 것: 실제 카메라 해상도, LiDAR 스캔 주기, Jetson의 실제 추론 FPS — 이건 하드웨어가 나와야 안다
 
-**이 문서에서 제일 중요한 건 5장(좌표계)과 6장(연동 규격)이다.** 나머지는 나중에 바꿔도 나 혼자 고치면 되지만, 이 둘은 강건·유찬이랑 물려 있어서 나중에 바꾸면 세 명이 같이 고쳐야 한다.
+**이 문서에서 제일 중요한 건 5장(좌표계)과 6장(연동 규격)이다.** 나머지는 나중에 바꿔도 나 혼자 고치면 되지만, 이 둘은 팀원이랑 물려 있어서 나중에 바꾸면 세 명이 같이 고쳐야 한다.
 
 ---
 
@@ -21,8 +21,8 @@
 ```
  [로봇 / Jetson]                    [EC2 1대]                    [관리자 PC]
  ┌────────────────┐          ┌──────────────────────┐          ┌─────────────┐
- │ YOLOv8 (유찬)  │          │  FastAPI             │          │  브라우저   │
- │ SLAM   (강건)  │──────────▶  ├ /ws/robot         │          │  ├ 대시보드 │
+ │ YOLOv8         │         │  FastAPI             │          │  브라우저   │
+ │ SLAM           │──────────▶  ├ /ws/robot         │          │  ├ 대시보드 │
  │ 이벤트 송신    │ WebSocket│  ├ /ws/dashboard  ───┼──push───▶│  └ 구역설정 │
  │ 로컬 버퍼(SQLite)         │  ├ REST API          │ WebSocket└─────────────┘
  └────────────────┘          │  └ 정적파일 서빙     │
@@ -36,13 +36,13 @@
 
 ## 2. 기술 스택과 선택 근거
 
-| 층 | 선택 | 근거 |
-|---|---|---|
-| 백엔드 | **FastAPI + WebSocket** | 팀원 전원이 Python(ROS2 rclpy, ultralytics)이라 코드·디버깅 공유가 됨. EC2 프리티어 1GB RAM에서 메모리 여유(대략 100MB대) |
-| DB | **SQLite (WAL 모드)** | 이벤트가 하루 수천 건 수준이면 충분. RDS는 비용·설정 부담만 큼. 파일 하나라 백업이 `cp` 한 번 |
-| 이미지 | **파일 저장 + DB엔 경로만** | 스냅샷을 BLOB으로 넣으면 DB 파일이 급격히 커지고 조회가 느려짐 |
-| 프론트 | **순수 HTML + JS (빌드 없음)** | npm 빌드 파이프라인이 없어 EC2에 파일만 올리면 끝. 지도는 `<canvas>`로 직접 그림 |
-| 배포 | **EC2 1대에 백/프론트 통합** | 도메인 1개, CORS 설정 없음, WebSocket 프록시 설정 없음 |
+| 층     | 선택                           | 근거                                                                                                                      |
+| ------ | ------------------------------ | ------------------------------------------------------------------------------------------------------------------------- |
+| 백엔드 | **FastAPI + WebSocket**        | 팀원 전원이 Python(ROS2 rclpy, ultralytics)이라 코드·디버깅 공유가 됨. EC2 프리티어 1GB RAM에서 메모리 여유(대략 100MB대) |
+| DB     | **SQLite (WAL 모드)**          | 이벤트가 하루 수천 건 수준이면 충분. RDS는 비용·설정 부담만 큼. 파일 하나라 백업이 `cp` 한 번                             |
+| 이미지 | **파일 저장 + DB엔 경로만**    | 스냅샷을 BLOB으로 넣으면 DB 파일이 급격히 커지고 조회가 느려짐                                                            |
+| 프론트 | **순수 HTML + JS (빌드 없음)** | npm 빌드 파이프라인이 없어 EC2에 파일만 올리면 끝. 지도는 `<canvas>`로 직접 그림                                          |
+| 배포   | **EC2 1대에 백/프론트 통합**   | 도메인 1개, CORS 설정 없음, WebSocket 프록시 설정 없음                                                                    |
 
 > 대안으로 검토했던 것: Spring Boot(실시간 자체는 문제없으나 JVM 메모리와 팀 언어 불일치), S3+EC2 분리(S3가 WebSocket을 못 받아 어차피 EC2 필요 → 설정만 늘어남).
 
@@ -83,31 +83,31 @@ helm-server/
 
 ### 4-1. `events` — 이상상황 기록
 
-| 컬럼 | 타입 | 설명 |
-|---|---|---|
-| `id` | TEXT PK | **로봇이 만든 UUID.** 서버가 만들지 않는다 (→ 4-4 참고) |
-| `robot_id` | TEXT | `helm-01` |
-| `type` | TEXT | `no_helmet` / `zone_intrusion` / `robot_estop` / `low_battery` |
-| `severity` | TEXT | `danger` / `caution` / `info` |
-| `ts` | REAL | **로봇이 감지한 시각** (UNIX epoch) |
-| `received_at` | REAL | **서버가 받은 시각** |
-| `x`, `y` | REAL | 월드 좌표 (m) |
-| `zone_id`, `zone_name` | TEXT | 판정된 구역 |
-| `confidence` | REAL | YOLO 신뢰도 0~1 |
-| `image_path` | TEXT | `/snapshots/{id}.jpg` |
-| `acked`, `acked_by`, `acked_at` | | 관리자 확인 처리 |
+| 컬럼                            | 타입    | 설명                                                           |
+| ------------------------------- | ------- | -------------------------------------------------------------- |
+| `id`                            | TEXT PK | **로봇이 만든 UUID.** 서버가 만들지 않는다 (→ 4-4 참고)        |
+| `robot_id`                      | TEXT    | `helm-01`                                                      |
+| `type`                          | TEXT    | `no_helmet` / `zone_intrusion` / `robot_estop` / `low_battery` |
+| `severity`                      | TEXT    | `danger` / `caution` / `info`                                  |
+| `ts`                            | REAL    | **로봇이 감지한 시각** (UNIX epoch)                            |
+| `received_at`                   | REAL    | **서버가 받은 시각**                                           |
+| `x`, `y`                        | REAL    | 월드 좌표 (m)                                                  |
+| `zone_id`, `zone_name`          | TEXT    | 판정된 구역                                                    |
+| `confidence`                    | REAL    | YOLO 신뢰도 0~1                                                |
+| `image_path`                    | TEXT    | `/snapshots/{id}.jpg`                                          |
+| `acked`, `acked_by`, `acked_at` |         | 관리자 확인 처리                                               |
 
 **`ts`와 `received_at`을 굳이 나눠 두는 이유**: 둘의 차이가 곧 "Wi-Fi가 끊겨 로컬 버퍼에 몇 초 있다가 올라왔는지"다. 계획서의 오프라인 버퍼링 기능이 실제로 동작했다는 걸 시연·발표에서 숫자로 보여줄 수 있는 유일한 근거다. 대시보드에 `지연수신` 배지로 표시한다.
 
 ### 4-2. `zones` — 위험구역
 
-| 컬럼 | 설명 |
-|---|---|
-| `id`, `name`, `note` | |
-| `kind` | `rect` / `circle` / `polygon` |
-| `severity` | `danger`(즉시 알림) / `caution`(기록만) / `safe`(알림 없음) |
-| `points` | JSON `[[x,y], ...]` — **월드 좌표 m** |
-| `center`, `radius` | 원형 전용 |
+| 컬럼                 | 설명                                                        |
+| -------------------- | ----------------------------------------------------------- |
+| `id`, `name`, `note` |                                                             |
+| `kind`               | `rect` / `circle` / `polygon`                               |
+| `severity`           | `danger`(즉시 알림) / `caution`(기록만) / `safe`(알림 없음) |
+| `points`             | JSON `[[x,y], ...]` — **월드 좌표 m**                       |
+| `center`, `radius`   | 원형 전용                                                   |
 
 `rect`도 저장할 때 네 꼭짓점 폴리곤으로 변환해 둔다. 판정 코드가 폴리곤 하나로 통일된다.
 
@@ -131,18 +131,18 @@ helm-server/
 
 좌표계가 셋이라 이름을 확실히 구분한다.
 
-| 이름 | 원점 | 단위 | 쓰는 곳 |
-|---|---|---|---|
-| **world** | SLAM 지도 원점 | m | 로봇 위치, 구역 좌표, DB 저장값 |
-| **pixel** | 지도 이미지 좌상단 | px | 지도 이미지 위 위치 |
-| **screen** | 캔버스 좌상단 | px | 확대·이동이 먹은 화면 좌표 |
+| 이름       | 원점               | 단위 | 쓰는 곳                         |
+| ---------- | ------------------ | ---- | ------------------------------- |
+| **world**  | SLAM 지도 원점     | m    | 로봇 위치, 구역 좌표, DB 저장값 |
+| **pixel**  | 지도 이미지 좌상단 | px   | 지도 이미지 위 위치             |
+| **screen** | 캔버스 좌상단      | px   | 확대·이동이 먹은 화면 좌표      |
 
 강건이 `ros2 run nav2_map_server map_saver_cli -f map` 을 돌리면 나오는 `map.yaml`은 이렇게 생겼다.
 
 ```yaml
 image: map.pgm
-resolution: 0.05          # m/pixel
-origin: [-10.0, -8.0, 0.0]  # 지도 '좌하단' 픽셀의 월드 좌표 [x, y, yaw]
+resolution: 0.05 # m/pixel
+origin: [-10.0, -8.0, 0.0] # 지도 '좌하단' 픽셀의 월드 좌표 [x, y, yaw]
 negate: 0
 occupied_thresh: 0.65
 free_thresh: 0.196
@@ -177,27 +177,35 @@ py = height - (world_y - origin_y) / resolution
 ### 6-1. 로봇 → 서버 : `WebSocket /ws/robot?token=<토큰>`
 
 **접속 직후 1회**
+
 ```json
 { "type": "hello", "robot_id": "helm-01" }
 ```
+
 서버 응답 — 현재 등록된 위험구역을 통째로 내려준다. 로봇은 이걸 받아 구역 판정에 쓴다.
+
 ```json
 { "type": "welcome", "server_time": 1755648000.0, "zones": [ ... ] }
 ```
 
 **주기적 상태 전송 (권장 2~5 Hz)**
+
 ```json
 {
   "type": "telemetry",
   "robot_id": "helm-01",
-  "x": 3.42, "y": -1.15, "yaw": 1.57,
+  "x": 3.42,
+  "y": -1.15,
+  "yaw": 1.57,
   "battery": 78.0,
   "state": "patrolling"
 }
 ```
+
 `state`: `patrolling` / `idle` / `estop` / `charging`
 
 **이상상황 발생 시**
+
 ```json
 {
   "type": "event",
@@ -207,13 +215,16 @@ py = height - (world_y - origin_y) / resolution
     "type": "no_helmet",
     "severity": "danger",
     "ts": 1755648012.345,
-    "x": 3.42, "y": -1.15,
+    "x": 3.42,
+    "y": -1.15,
     "confidence": 0.91,
     "image_b64": "<JPEG base64>"
   }
 }
 ```
+
 서버 응답 — **이 ack를 받은 뒤에 로컬 버퍼에서 지운다.**
+
 ```json
 { "type": "ack", "id": "550e8400-...", "duplicate": false }
 ```
@@ -223,34 +234,36 @@ py = height - (world_y - origin_y) / resolution
 ### 6-2. 서버 → 대시보드 : `WebSocket /ws/dashboard`
 
 접속 즉시 현재 상태 전체를 한 번 내려준다(새로고침해도 화면이 비지 않게).
+
 ```json
 { "type": "snapshot", "events": [...], "zones": [...], "robots": [...], "map": {...} }
 ```
+
 이후 변화가 생길 때만 낱개로 push:
 
-| type | 내용 |
-|---|---|
-| `event` | 새 이상상황. `delayed: true`면 버퍼링됐다 올라온 것 |
-| `event_acked` | 다른 관리자가 확인 처리함 |
-| `telemetry` | 로봇 위치·배터리 갱신 |
-| `robot_offline` / `robot_online` | 10초간 소식 없으면 오프라인 |
-| `zones_updated` | 구역이 수정됨 |
-| `map_updated` | 새 지도가 업로드됨 |
+| type                             | 내용                                                |
+| -------------------------------- | --------------------------------------------------- |
+| `event`                          | 새 이상상황. `delayed: true`면 버퍼링됐다 올라온 것 |
+| `event_acked`                    | 다른 관리자가 확인 처리함                           |
+| `telemetry`                      | 로봇 위치·배터리 갱신                               |
+| `robot_offline` / `robot_online` | 10초간 소식 없으면 오프라인                         |
+| `zones_updated`                  | 구역이 수정됨                                       |
+| `map_updated`                    | 새 지도가 업로드됨                                  |
 
 > **`robot_offline`이 왜 필요한가**: 이게 없으면 Wi-Fi가 끊겨도 대시보드에 마지막 위치가 그대로 떠 있어서 "정상 순찰 중"으로 오해한다. 안전 시스템에서 제일 위험한 착각이라 워치독을 따로 둔다.
 
 ### 6-3. REST API
 
-| 메서드 | 경로 | 용도 |
-|---|---|---|
-| GET | `/api/events?limit&type&severity&acked` | 이벤트 조회 |
-| POST | `/api/events` | 로봇 HTTP 폴백 |
-| POST | `/api/events/{id}/ack` | 확인 처리 |
-| GET | `/api/stats` | 요약 집계 |
-| GET / PUT | `/api/zones` | 구역 조회 / 전체 교체 저장 |
-| GET / POST | `/api/map` | 지도 메타 조회 / 업로드 |
-| GET | `/api/map/image` | 지도 이미지 |
-| GET | `/api/health` | 헬스체크 |
+| 메서드     | 경로                                    | 용도                       |
+| ---------- | --------------------------------------- | -------------------------- |
+| GET        | `/api/events?limit&type&severity&acked` | 이벤트 조회                |
+| POST       | `/api/events`                           | 로봇 HTTP 폴백             |
+| POST       | `/api/events/{id}/ack`                  | 확인 처리                  |
+| GET        | `/api/stats`                            | 요약 집계                  |
+| GET / PUT  | `/api/zones`                            | 구역 조회 / 전체 교체 저장 |
+| GET / POST | `/api/map`                              | 지도 메타 조회 / 업로드    |
+| GET        | `/api/map/image`                        | 지도 이미지                |
+| GET        | `/api/health`                           | 헬스체크                   |
 
 구역 저장을 개별 PATCH가 아니라 **PUT 전체 교체**로 하는 이유: 편집기에서 "저장"을 누른 순간 화면 상태가 곧 정답이다. 개별 수정으로 쪼개면 삭제된 구역이 서버에 남는 동기화 사고가 난다.
 
@@ -324,16 +337,16 @@ py = height - (world_y - origin_y) / resolution
 
 ## 9. 구현 순서 (남은 4주)
 
-| 단계 | 내용 | 완료 기준 | 시점 |
-|---|---|---|---|
-| 1 | 서버 뼈대 + DB + WebSocket 2종 | `mock_robot.py`가 붙어서 telemetry가 들어옴 | 2주차 |
-| 2 | 대시보드 실시간 알림 | 가짜 이벤트가 새로고침 없이 카드로 뜸 | 2주차 |
-| 3 | 지도 렌더 + 로봇 마커 | 지도 위에서 로봇이 움직임 (y축 뒤집힘 확인!) | 3주차 |
-| 4 | 구역 편집기 | 그린 구역이 저장되고 새로고침해도 남아 있음 | 3주차 |
-| 5 | 오프라인 버퍼링 검증 | `--offline` 테스트에서 유실 0, 중복 0 | 3주차 |
-| 6 | EC2 배포 | 외부 URL로 접속되고 WebSocket이 붙음 | 4주차 |
-| 7 | 실제 로봇 연동 | 가짜 로봇을 강건의 노드로 교체 | 4~5주차 |
-| 8 | 시연 시나리오 리허설 | 발표용 흐름 3분 안에 끝남 | 5주차 |
+| 단계 | 내용                           | 완료 기준                                    | 시점    |
+| ---- | ------------------------------ | -------------------------------------------- | ------- |
+| 1    | 서버 뼈대 + DB + WebSocket 2종 | `mock_robot.py`가 붙어서 telemetry가 들어옴  | 2주차   |
+| 2    | 대시보드 실시간 알림           | 가짜 이벤트가 새로고침 없이 카드로 뜸        | 2주차   |
+| 3    | 지도 렌더 + 로봇 마커          | 지도 위에서 로봇이 움직임 (y축 뒤집힘 확인!) | 3주차   |
+| 4    | 구역 편집기                    | 그린 구역이 저장되고 새로고침해도 남아 있음  | 3주차   |
+| 5    | 오프라인 버퍼링 검증           | `--offline` 테스트에서 유실 0, 중복 0        | 3주차   |
+| 6    | EC2 배포                       | 외부 URL로 접속되고 WebSocket이 붙음         | 4주차   |
+| 7    | 실제 로봇 연동                 | 가짜 로봇을 강건의 노드로 교체               | 4~5주차 |
+| 8    | 시연 시나리오 리허설           | 발표용 흐름 3분 안에 끝남                    | 5주차   |
 
 **1~5단계는 하드웨어와 완전히 독립이다.** 즉 지금 당장 3주차 분량까지 밀고 나갈 수 있다.
 

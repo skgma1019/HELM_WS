@@ -1,0 +1,413 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8" />
+<title>HELM 개발용 테스트 콘솔</title>
+<style>
+  :root {
+    color-scheme: light;
+    font-family: -apple-system, "Segoe UI", "맑은 고딕", sans-serif;
+  }
+  body {
+    max-width: 720px;
+    margin: 24px auto;
+    padding: 0 16px;
+    color: #1a1a1a;
+  }
+  h1 {
+    font-size: 18px;
+  }
+  .warning {
+    background: #fff3cd;
+    border: 1px solid #e6c200;
+    padding: 8px 12px;
+    border-radius: 4px;
+    font-size: 13px;
+    margin-bottom: 16px;
+  }
+  fieldset {
+    border: 1px solid #ccc;
+    border-radius: 6px;
+    margin-bottom: 16px;
+    padding: 12px 16px;
+  }
+  legend {
+    font-weight: bold;
+    font-size: 13px;
+    padding: 0 4px;
+  }
+  label {
+    display: block;
+    font-size: 13px;
+    margin-top: 8px;
+  }
+  input[type="text"],
+  input[type="number"],
+  select {
+    width: 100%;
+    box-sizing: border-box;
+    padding: 6px 8px;
+    margin-top: 2px;
+    font-size: 14px;
+  }
+  .radio-row {
+    display: flex;
+    gap: 16px;
+    margin-top: 8px;
+    font-size: 13px;
+  }
+  .radio-row label {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    margin-top: 0;
+  }
+  .photo-mode-panel {
+    margin-top: 6px;
+  }
+  .sample-empty {
+    font-size: 13px;
+    color: #c0392b;
+  }
+  input[type="range"] {
+    width: 100%;
+    margin-top: 4px;
+  }
+  .slider-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .slider-row input[type="range"] {
+    flex: 1;
+  }
+  .value-label {
+    font-size: 13px;
+    color: #555;
+    min-width: 48px;
+    text-align: right;
+  }
+  .row {
+    display: flex;
+    gap: 12px;
+  }
+  .row > div {
+    flex: 1;
+  }
+  .buttons {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+    margin-top: 12px;
+  }
+  button {
+    padding: 10px;
+    font-size: 14px;
+    border-radius: 4px;
+    border: 1px solid #999;
+    background: #f5f5f5;
+    cursor: pointer;
+  }
+  button:hover {
+    background: #eaeaea;
+  }
+  button.danger {
+    border-color: #c0392b;
+    color: #c0392b;
+  }
+  button.ok {
+    border-color: #27ae60;
+    color: #27ae60;
+  }
+  #log {
+    font-family: "Consolas", monospace;
+    font-size: 12px;
+    background: #1e1e1e;
+    color: #ddd;
+    padding: 10px;
+    border-radius: 6px;
+    height: 260px;
+    overflow-y: auto;
+  }
+  .log-entry {
+    white-space: pre-wrap;
+    padding: 2px 0;
+    border-bottom: 1px solid #333;
+  }
+  .log-entry.ok::before {
+    content: "[성공] ";
+    color: #6fcf97;
+  }
+  .log-entry.err::before {
+    content: "[실패] ";
+    color: #eb5757;
+  }
+</style>
+</head>
+<body>
+<h1>HELM 개발용 테스트 콘솔</h1>
+<p class="warning">
+  개발용 페이지입니다. HELM_DEV=1일 때만 서빙되며, EC2 운영 배포본에는 절대 올라가면 안 됩니다.
+</p>
+
+<fieldset>
+  <legend>연결 설정</legend>
+  <label for="token">로봇 토큰 (X-Robot-Token)</label>
+  <input type="text" id="token" placeholder="HELM_ROBOT_TOKEN 값" />
+
+  <label for="robotId">robot_id</label>
+  <input type="text" id="robotId" value="helm-01" />
+
+  <div class="row">
+    <div>
+      <label for="x">x (m)</label>
+      <input type="number" id="x" value="3.0" step="0.1" />
+    </div>
+    <div>
+      <label for="y">y (m)</label>
+      <input type="number" id="y" value="3.0" step="0.1" />
+    </div>
+  </div>
+
+  <label>사진 첨부 (선택)</label>
+  <div class="radio-row">
+    <label><input type="radio" name="photoMode" value="sample" checked /> 샘플 사용</label>
+    <label><input type="radio" name="photoMode" value="file" /> 직접 선택</label>
+  </div>
+
+  <div class="photo-mode-panel" id="samplePanel">
+    <select id="sampleSelect"></select>
+    <div class="sample-empty" id="sampleEmpty" style="display: none">
+      data/samples/ 에 이미지가 없습니다 — 사진 없이 전송됩니다
+    </div>
+  </div>
+  <div class="photo-mode-panel" id="filePanel" style="display: none">
+    <input type="file" id="image" accept="image/*" />
+  </div>
+</fieldset>
+
+<fieldset>
+  <legend>로봇 상태 ("정상" 버튼으로 전송)</legend>
+  <label for="state">state</label>
+  <select id="state">
+    <option value="patrolling">patrolling</option>
+    <option value="idle">idle</option>
+    <option value="estop">estop</option>
+    <option value="charging">charging</option>
+  </select>
+
+  <label for="battery">battery</label>
+  <div class="slider-row">
+    <input type="range" id="battery" min="0" max="100" step="1" value="80" />
+    <span class="value-label" id="batteryValue">80%</span>
+  </div>
+
+  <label for="yaw">yaw (지도 위 로봇 방향 확인용)</label>
+  <div class="slider-row">
+    <input type="range" id="yaw" min="0" max="360" step="1" value="0" />
+    <span class="value-label" id="yawValue">0°</span>
+  </div>
+</fieldset>
+
+<fieldset>
+  <legend>이벤트 전송</legend>
+  <div class="buttons">
+    <button class="danger" id="btn-no-helmet">안전모 미착용</button>
+    <button class="danger" id="btn-zone">위험구역 침입</button>
+    <button class="danger" id="btn-estop">로봇 비상정지</button>
+    <button class="ok" id="btn-normal">정상 (안전모 착용)</button>
+  </div>
+</fieldset>
+
+<fieldset>
+  <legend>전송 로그</legend>
+  <div id="log"></div>
+</fieldset>
+
+<script>
+  const $ = (id) => document.getElementById(id);
+
+  function loadSaved() {
+    $("token").value = localStorage.getItem("helm_dev_token") || "";
+    $("robotId").value = localStorage.getItem("helm_dev_robot_id") || "helm-01";
+  }
+  $("token").addEventListener("input", () => localStorage.setItem("helm_dev_token", $("token").value));
+  $("robotId").addEventListener("input", () => localStorage.setItem("helm_dev_robot_id", $("robotId").value));
+
+  $("battery").addEventListener("input", () => {
+    $("batteryValue").textContent = `${$("battery").value}%`;
+  });
+  $("yaw").addEventListener("input", () => {
+    $("yawValue").textContent = `${$("yaw").value}°`;
+  });
+
+  function log(message, ok) {
+    const el = document.createElement("div");
+    el.className = "log-entry " + (ok ? "ok" : "err");
+    const time = new Date().toLocaleTimeString();
+    el.textContent = `[${time}] ${message}`;
+    $("log").prepend(el);
+  }
+
+  function blobToBase64(blob) {
+    // File도 Blob이라 파일 선택/샘플 fetch 양쪽 다 이 함수 하나로 처리한다
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result.split(",")[1]);
+      reader.onerror = reject;
+      reader.readAsDataURL(blob);
+    });
+  }
+
+  async function loadSampleList() {
+    const select = $("sampleSelect");
+    const empty = $("sampleEmpty");
+    try {
+      const res = await fetch("/api/dev/samples");
+      const data = await res.json();
+      const samples = data.samples || [];
+      select.innerHTML = "";
+      if (samples.length === 0) {
+        select.style.display = "none";
+        empty.style.display = "block";
+        return;
+      }
+      select.style.display = "block";
+      empty.style.display = "none";
+      for (const name of samples) {
+        const option = document.createElement("option");
+        option.value = name;
+        option.textContent = name;
+        select.appendChild(option);
+      }
+      // "안전모 미착용" 테스트가 제일 잦으니 있으면 기본으로 골라둔다
+      select.value = samples.includes("helmet_off.jpg") ? "helmet_off.jpg" : samples[0];
+    } catch (err) {
+      select.style.display = "none";
+      empty.style.display = "block";
+      log(`샘플 목록을 불러오지 못함: ${err}`, false);
+    }
+  }
+
+  function setupPhotoModeToggle() {
+    const radios = document.querySelectorAll('input[name="photoMode"]');
+    radios.forEach((radio) => {
+      radio.addEventListener("change", () => {
+        const mode = document.querySelector('input[name="photoMode"]:checked').value;
+        $("samplePanel").style.display = mode === "sample" ? "block" : "none";
+        $("filePanel").style.display = mode === "file" ? "block" : "none";
+      });
+    });
+  }
+
+  async function getImageBase64() {
+    const mode = document.querySelector('input[name="photoMode"]:checked').value;
+
+    if (mode === "file") {
+      const file = $("image").files[0];
+      return file ? blobToBase64(file) : null;
+    }
+
+    // 샘플 사용
+    const filename = $("sampleSelect").value;
+    if (!filename) return null; // 샘플 없음 -> 사진 없이 전송
+    const res = await fetch(`/api/dev/samples/${encodeURIComponent(filename)}`);
+    if (!res.ok) {
+      log(`샘플 이미지를 불러오지 못함: ${filename}`, false);
+      return null;
+    }
+    const blob = await res.blob();
+    return blobToBase64(blob);
+  }
+
+  function getCommonFields() {
+    const token = $("token").value.trim();
+    const robotId = $("robotId").value.trim() || "helm-01";
+    const x = parseFloat($("x").value);
+    const y = parseFloat($("y").value);
+    return { token, robotId, x, y };
+  }
+
+  async function sendEvent(type, severity) {
+    const { token, robotId, x, y } = getCommonFields();
+    if (!token) {
+      log("토큰을 먼저 입력하세요", false);
+      return;
+    }
+
+    const id = crypto.randomUUID(); // 이벤트 id는 로봇(여기서는 이 페이지)이 만든다 — 서버는 새로 만들지 않는다
+    const event = {
+      id,
+      robot_id: robotId,
+      type,
+      severity,
+      ts: Date.now() / 1000,
+      x,
+      y,
+    };
+    if (type === "no_helmet") {
+      event.confidence = 0.9;
+    }
+
+    const imageB64 = await getImageBase64();
+    if (imageB64) {
+      event.image_b64 = imageB64;
+    }
+
+    try {
+      const res = await fetch("/api/events", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-Robot-Token": token },
+        body: JSON.stringify(event),
+      });
+      const data = await res.json().catch(() => null);
+      if (!res.ok) {
+        log(`${type} 전송 실패 (HTTP ${res.status}): ${JSON.stringify(data)}`, false);
+        return;
+      }
+      log(`${type} 전송 성공 id=${id.slice(0, 8)} duplicate=${data.duplicate}`, true);
+    } catch (err) {
+      log(`${type} 전송 오류: ${err}`, false);
+    }
+  }
+
+  async function sendNormalStatus() {
+    const { token, robotId, x, y } = getCommonFields();
+    if (!token) {
+      log("토큰을 먼저 입력하세요", false);
+      return;
+    }
+
+    const state = $("state").value;
+    const battery = parseFloat($("battery").value);
+    const yawDeg = parseFloat($("yaw").value);
+    const yaw = (yawDeg * Math.PI) / 180; // 프로토콜은 라디안 (설계서 6-1 telemetry 예시 참고)
+
+    try {
+      const res = await fetch("/api/robot/status", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-Robot-Token": token },
+        body: JSON.stringify({ robot_id: robotId, x, y, yaw, battery, state }),
+      });
+      const data = await res.json().catch(() => null);
+      if (!res.ok) {
+        log(`상태 갱신 실패 (HTTP ${res.status}): ${JSON.stringify(data)}`, false);
+        return;
+      }
+      log(`로봇 상태 갱신: state=${state} battery=${battery}% yaw=${yawDeg}° (이벤트 없음)`, true);
+    } catch (err) {
+      log(`상태 갱신 오류: ${err}`, false);
+    }
+  }
+
+  $("btn-no-helmet").addEventListener("click", () => sendEvent("no_helmet", "danger"));
+  $("btn-zone").addEventListener("click", () => sendEvent("zone_intrusion", "danger"));
+  $("btn-estop").addEventListener("click", () => sendEvent("robot_estop", "danger"));
+  $("btn-normal").addEventListener("click", sendNormalStatus);
+
+  loadSaved();
+  setupPhotoModeToggle();
+  loadSampleList();
+</script>
+</body>
+</html>
