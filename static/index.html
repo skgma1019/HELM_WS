@@ -1,0 +1,432 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>HELM 관제 대시보드</title>
+<link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+<header class="topbar">
+  <h1>HELM 관제 대시보드</h1>
+  <div class="status-group">
+    <div class="status-pill status-connecting" id="serverStatus">
+      <span class="dot"></span><span class="status-text">서버: 연결 중</span>
+    </div>
+    <div class="status-pill status-unknown" id="robotStatus">
+      <span class="dot"></span><span class="status-text">로봇: 확인 중</span>
+    </div>
+  </div>
+</header>
+
+<section class="tiles">
+  <div class="tile">
+    <div class="tile-label">미확인 알림</div>
+    <div class="tile-value" id="tileUnacked">0</div>
+  </div>
+  <div class="tile">
+    <div class="tile-label">24시간 이상상황</div>
+    <div class="tile-value" id="tile24h">0</div>
+  </div>
+  <div class="tile">
+    <div class="tile-label">로봇 상태</div>
+    <div class="tile-value" id="tileRobotState">-</div>
+  </div>
+  <div class="tile">
+    <div class="tile-label">배터리</div>
+    <div class="tile-value" id="tileBattery">-</div>
+  </div>
+</section>
+
+<section class="main-content">
+  <div class="map-panel">
+    <div class="map-panel-header">
+      <h2>현장 지도</h2>
+      <button class="fit-btn" id="fitMapBtn">화면 맞춤</button>
+    </div>
+    <div class="map-canvas-wrap">
+      <canvas id="mapCanvas"></canvas>
+    </div>
+  </div>
+
+  <div class="alerts">
+    <h2>실시간 알림</h2>
+    <div class="alert-list" id="alertList"></div>
+  </div>
+</section>
+
+<div class="modal-backdrop" id="modalBackdrop">
+  <div class="modal">
+    <button class="modal-close" id="modalClose" aria-label="닫기">✕</button>
+    <div class="modal-photo" id="modalPhoto"></div>
+    <div class="modal-body">
+      <h3 id="modalTitle"></h3>
+      <div class="modal-badges" id="modalBadges"></div>
+      <dl class="modal-details" id="modalDetails"></dl>
+      <button class="ack-btn" id="ackBtn">확인 처리</button>
+    </div>
+  </div>
+</div>
+
+<script src="/map.js"></script>
+<script>
+  const $ = (id) => document.getElementById(id);
+
+  const TYPE_LABELS = {
+    no_helmet: "안전모 미착용",
+    zone_intrusion: "위험구역 침입",
+    robot_estop: "로봇 비상정지",
+    low_battery: "배터리 부족",
+  };
+  const SEVERITY_LABELS = { danger: "위험", caution: "주의", info: "정보" };
+  const SEVERITY_BADGE_CLASS = { danger: "badge-danger", caution: "badge-caution", info: "badge-info" };
+  const STATE_LABELS = { patrolling: "순찰 중", idle: "대기", estop: "비상정지", charging: "충전 중" };
+
+  const ROBOT_OFFLINE_THRESHOLD_MS = 10000;
+  const INITIAL_RECONNECT_DELAY_MS = 1000;
+  const MAX_RECONNECT_DELAY_MS = 30000;
+
+  const alertListEl = $("alertList");
+  const serverStatusEl = $("serverStatus");
+  const robotStatusEl = $("robotStatus");
+  const tileUnackedEl = $("tileUnacked");
+  const tile24hEl = $("tile24h");
+  const tileRobotStateEl = $("tileRobotState");
+  const tileBatteryEl = $("tileBattery");
+  const modalBackdropEl = $("modalBackdrop");
+  const modalPhotoEl = $("modalPhoto");
+  const modalTitleEl = $("modalTitle");
+  const modalBadgesEl = $("modalBadges");
+  const modalDetailsEl = $("modalDetails");
+  const ackBtnEl = $("ackBtn");
+
+  const mapView = new MapView($("mapCanvas"), { onEventClick: (id) => openModal(id) });
+  window.mapView = mapView; // 콘솔 디버깅용
+
+  const eventsById = new Map();
+  const eventOrder = []; // id만, 최신순
+  const robots = {}; // robot_id -> {..., lastSeenAt}
+  let primaryRobotId = null;
+  let currentModalId = null;
+  let reconnectDelayMs = INITIAL_RECONNECT_DELAY_MS;
+
+  // ---------- 포맷 헬퍼 ----------
+
+  function fmtNum(n) {
+    return typeof n === "number" ? n.toFixed(2) : "-";
+  }
+  function formatTime(ts) {
+    return new Date(ts * 1000).toLocaleTimeString("ko-KR", { hour12: false });
+  }
+  function formatDateTime(ts) {
+    return new Date(ts * 1000).toLocaleString("ko-KR", { hour12: false });
+  }
+  function makeBadge(text, cls) {
+    const span = document.createElement("span");
+    span.className = "badge " + cls;
+    span.textContent = text;
+    return span;
+  }
+  function severityBadge(sev) {
+    return makeBadge(SEVERITY_LABELS[sev] || sev, SEVERITY_BADGE_CLASS[sev] || "badge-info");
+  }
+
+  // ---------- 알림 카드 ----------
+
+  function renderCard(event, { isNew = false } = {}) {
+    const card = document.createElement("div");
+    card.className = "alert-card" + (event.acked ? " acked" : "") + (isNew ? " new" : "");
+    card.dataset.id = event.id;
+
+    const thumb = document.createElement("div");
+    thumb.className = "alert-thumb";
+    if (event.image_path) {
+      const img = document.createElement("img");
+      img.src = event.image_path;
+      img.alt = TYPE_LABELS[event.type] || event.type;
+      thumb.appendChild(img);
+    } else {
+      thumb.classList.add("no-photo");
+      thumb.textContent = "사진 없음";
+    }
+
+    const info = document.createElement("div");
+    info.className = "alert-info";
+    const title = document.createElement("div");
+    title.className = "alert-type";
+    title.textContent = TYPE_LABELS[event.type] || event.type;
+    const meta = document.createElement("div");
+    meta.className = "alert-meta";
+    meta.textContent = `${formatTime(event.ts)} · (${fmtNum(event.x)}, ${fmtNum(event.y)})`;
+    info.appendChild(title);
+    info.appendChild(meta);
+
+    const badges = document.createElement("div");
+    badges.className = "alert-badges";
+    badges.appendChild(severityBadge(event.severity));
+    if (event.delayed) badges.appendChild(makeBadge("지연수신", "badge-delayed"));
+    if (event.acked) badges.appendChild(makeBadge("✓ 확인됨", "badge-acked"));
+
+    card.appendChild(thumb);
+    card.appendChild(info);
+    card.appendChild(badges);
+    card.addEventListener("click", () => openModal(event.id));
+
+    if (isNew) {
+      setTimeout(() => card.classList.remove("new"), 2000);
+    }
+    return card;
+  }
+
+  function renderEmptyState() {
+    if (eventOrder.length > 0) return;
+    const empty = document.createElement("div");
+    empty.className = "alert-empty";
+    empty.id = "alertEmpty";
+    empty.textContent = "아직 이상상황이 없습니다";
+    alertListEl.appendChild(empty);
+  }
+  function removeEmptyState() {
+    const el = $("alertEmpty");
+    if (el) el.remove();
+  }
+
+  // ---------- 타일 / 상태 표시 ----------
+
+  function updateTiles() {
+    let unacked = 0;
+    let last24h = 0;
+    const nowSec = Date.now() / 1000;
+    for (const id of eventOrder) {
+      const ev = eventsById.get(id);
+      if (!ev.acked) unacked++;
+      if (nowSec - ev.ts <= 86400) last24h++;
+    }
+    tileUnackedEl.textContent = unacked;
+    tile24hEl.textContent = last24h;
+  }
+
+  function setServerStatus(state, text) {
+    serverStatusEl.className = "status-pill status-" + state;
+    serverStatusEl.querySelector(".status-text").textContent = text;
+  }
+  function setRobotStatus(state, text) {
+    robotStatusEl.className = "status-pill status-" + state;
+    robotStatusEl.querySelector(".status-text").textContent = text;
+  }
+
+  function updateRobotStatus() {
+    const r = primaryRobotId ? robots[primaryRobotId] : null;
+    if (!r) {
+      setRobotStatus("unknown", "로봇: 연결 안 됨");
+      tileRobotStateEl.textContent = "-";
+      tileBatteryEl.textContent = "-";
+      return;
+    }
+    const online = Date.now() - r.lastSeenAt < ROBOT_OFFLINE_THRESHOLD_MS;
+    const stateText = STATE_LABELS[r.state] || r.state || "-";
+    setRobotStatus(online ? "online" : "offline", `로봇: ${online ? stateText : "오프라인"}`);
+    tileRobotStateEl.textContent = stateText;
+    tileBatteryEl.textContent = r.battery != null ? `${Math.round(r.battery)}%` : "-";
+  }
+
+  // ---------- WebSocket 메시지 처리 ----------
+
+  function handleSnapshot(msg) {
+    eventsById.clear();
+    eventOrder.length = 0;
+    alertListEl.innerHTML = "";
+
+    for (const ev of msg.events || []) {
+      eventsById.set(ev.id, ev);
+      eventOrder.push(ev.id);
+      alertListEl.appendChild(renderCard(ev));
+    }
+    renderEmptyState();
+
+    for (const r of msg.robots || []) {
+      robots[r.robot_id] = { ...r, lastSeenAt: r.last_seen ? r.last_seen * 1000 : Date.now() };
+      if (!primaryRobotId) primaryRobotId = r.robot_id;
+      mapView.updateRobot(r.robot_id, { x: r.x, y: r.y, yaw: r.yaw });
+    }
+
+    mapView.setEvents([...eventsById.values()]);
+    updateTiles();
+    updateRobotStatus();
+  }
+
+  function handleNewEvent(msg) {
+    removeEmptyState();
+    const ev = { ...msg.event, delayed: msg.delayed };
+    eventsById.set(ev.id, ev);
+    eventOrder.unshift(ev.id);
+    alertListEl.prepend(renderCard(ev, { isNew: true }));
+    mapView.setEvents([...eventsById.values()]);
+    updateTiles();
+  }
+
+  function applyAck(id, ackedBy) {
+    const ev = eventsById.get(id);
+    if (!ev) return;
+    ev.acked = true;
+    ev.acked_by = ackedBy;
+    const card = alertListEl.querySelector(`[data-id="${CSS.escape(id)}"]`);
+    if (card) card.replaceWith(renderCard(ev));
+    mapView.setEvents([...eventsById.values()]);
+    updateTiles();
+    if (currentModalId === id) openModal(id);
+  }
+
+  function handleTelemetry(msg) {
+    const prev = robots[msg.robot_id] || {};
+    robots[msg.robot_id] = { ...prev, ...msg, lastSeenAt: Date.now() };
+    if (!primaryRobotId) primaryRobotId = msg.robot_id;
+    mapView.updateRobot(msg.robot_id, { x: msg.x, y: msg.y, yaw: msg.yaw });
+    updateRobotStatus();
+  }
+
+  function handleMapUpdated(msg) {
+    if (!msg.map) return;
+    mapView.setMapMeta(msg.map);
+    mapView.reloadImage();
+  }
+
+  function dispatchMessage(msg) {
+    switch (msg.type) {
+      case "snapshot":
+        handleSnapshot(msg);
+        break;
+      case "event":
+        handleNewEvent(msg);
+        break;
+      case "event_acked":
+        applyAck(msg.id, msg.acked_by);
+        break;
+      case "telemetry":
+        handleTelemetry(msg);
+        break;
+      case "map_updated":
+        handleMapUpdated(msg);
+        break;
+      default:
+        break; // robot_online/offline, zones_updated 등은 다음 단계에서
+    }
+  }
+
+  // ---------- WebSocket 연결 (지수 백오프 재연결) ----------
+
+  function connectDashboardWs() {
+    const proto = location.protocol === "https:" ? "wss" : "ws";
+    const ws = new WebSocket(`${proto}://${location.host}/ws/dashboard`);
+
+    ws.addEventListener("open", () => {
+      reconnectDelayMs = INITIAL_RECONNECT_DELAY_MS;
+      setServerStatus("online", "서버: 연결됨");
+    });
+    ws.addEventListener("message", (ev) => {
+      let msg;
+      try {
+        msg = JSON.parse(ev.data);
+      } catch {
+        return;
+      }
+      dispatchMessage(msg);
+    });
+    ws.addEventListener("close", () => {
+      setServerStatus("reconnecting", "서버: 재연결 중");
+      setTimeout(connectDashboardWs, reconnectDelayMs);
+      reconnectDelayMs = Math.min(reconnectDelayMs * 2, MAX_RECONNECT_DELAY_MS);
+    });
+    ws.addEventListener("error", () => ws.close());
+  }
+
+  // ---------- 모달 ----------
+
+  function addDetailRow(label, value) {
+    const dt = document.createElement("dt");
+    dt.textContent = label;
+    const dd = document.createElement("dd");
+    dd.textContent = value;
+    modalDetailsEl.appendChild(dt);
+    modalDetailsEl.appendChild(dd);
+  }
+
+  function openModal(id) {
+    const ev = eventsById.get(id);
+    if (!ev) return;
+    currentModalId = id;
+
+    modalTitleEl.textContent = TYPE_LABELS[ev.type] || ev.type;
+
+    modalPhotoEl.innerHTML = "";
+    modalPhotoEl.classList.remove("no-photo");
+    if (ev.image_path) {
+      const img = document.createElement("img");
+      img.src = ev.image_path;
+      img.alt = TYPE_LABELS[ev.type] || ev.type;
+      modalPhotoEl.appendChild(img);
+    } else {
+      modalPhotoEl.classList.add("no-photo");
+      modalPhotoEl.textContent = "사진 없음";
+    }
+
+    modalBadgesEl.innerHTML = "";
+    modalBadgesEl.appendChild(severityBadge(ev.severity));
+    if (ev.delayed) modalBadgesEl.appendChild(makeBadge("지연수신", "badge-delayed"));
+    if (ev.acked) modalBadgesEl.appendChild(makeBadge("✓ 확인됨", "badge-acked"));
+
+    const delaySec = Math.max(0, ev.received_at - ev.ts);
+    modalDetailsEl.innerHTML = "";
+    addDetailRow("좌표", `(${fmtNum(ev.x)}, ${fmtNum(ev.y)})`);
+    addDetailRow("신뢰도", ev.confidence != null ? `${Math.round(ev.confidence * 100)}%` : "-");
+    addDetailRow("로봇 ID", ev.robot_id || "-");
+    addDetailRow("이벤트 ID", ev.id);
+    addDetailRow("발생 시각", formatDateTime(ev.ts));
+    addDetailRow("서버 수신 시각", formatDateTime(ev.received_at));
+    addDetailRow("지연", `${delaySec.toFixed(1)}초 지연`);
+
+    ackBtnEl.disabled = !!ev.acked;
+    ackBtnEl.textContent = ev.acked ? "확인 처리됨" : "확인 처리";
+
+    modalBackdropEl.classList.add("open");
+  }
+
+  function closeModal() {
+    modalBackdropEl.classList.remove("open");
+    currentModalId = null;
+  }
+
+  $("modalClose").addEventListener("click", closeModal);
+  modalBackdropEl.addEventListener("click", (e) => {
+    if (e.target === modalBackdropEl) closeModal();
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") closeModal();
+  });
+
+  ackBtnEl.addEventListener("click", async () => {
+    if (!currentModalId || ackBtnEl.disabled) return;
+    const id = currentModalId;
+    ackBtnEl.disabled = true;
+    ackBtnEl.textContent = "처리 중...";
+    try {
+      const res = await fetch(`/api/events/${id}/ack`, { method: "POST" });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      applyAck(id, "dashboard");
+    } catch (err) {
+      console.error("ack 실패", err);
+      ackBtnEl.disabled = false;
+      ackBtnEl.textContent = "확인 처리 실패 - 다시 시도";
+    }
+  });
+
+  $("fitMapBtn").addEventListener("click", () => mapView.fitToView());
+
+  // ---------- 시작 ----------
+
+  mapView.loadMap();
+  connectDashboardWs();
+  setInterval(updateRobotStatus, 3000);
+</script>
+</body>
+</html>

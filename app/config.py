@@ -3,6 +3,11 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+from dotenv import load_dotenv
+
+# override=False가 기본값 — 이미 설정된 실제 환경변수가 .env 값보다 우선해야 한다 (배포 환경 안전장치)
+load_dotenv()
+
 # 저장소 루트 (app/ 의 부모)
 BASE_DIR = Path(__file__).resolve().parent.parent
 

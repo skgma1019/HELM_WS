@@ -1,4 +1,4 @@
-"""강건의 SLAM 결과가 나오기 전까지 쓸 가짜 지도(map.png + map.yaml)를 만든다.
+"""팀원의 SLAM 결과가 나오기 전까지 쓸 가짜 지도(map.png + map.yaml)를 만든다.
 
 ROS map_server 규격(resolution, origin, negate, occupied_thresh, free_thresh)을 그대로 따른다.
 나중에 진짜 지도로 교체할 때 이 규격만 맞으면 서버/프론트는 아무것도 안 고쳐도 된다.

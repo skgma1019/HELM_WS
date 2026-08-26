@@ -4,11 +4,25 @@ import base64
 import json
 import logging
 import time
+from dataclasses import asdict
+from pathlib import Path
 
-from fastapi import FastAPI, Header, HTTPException, Query, WebSocket, WebSocketDisconnect, status
+import yaml
+from fastapi import (
+    FastAPI,
+    File,
+    Header,
+    HTTPException,
+    Query,
+    UploadFile,
+    WebSocket,
+    WebSocketDisconnect,
+    status,
+)
 from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 
-from app import config, db
+from app import config, db, geometry
 from app.hub import hub
 
 logging.basicConfig(level=logging.INFO)
@@ -19,11 +33,23 @@ EVENT_DELAY_THRESHOLD_SEC = 3.0
 
 app = FastAPI(title="HELM 관제 서버")
 
+# StaticFiles는 마운트 시점에 디렉터리가 있어야 한다 — on_startup보다 먼저 만들어둔다
+config.SNAPSHOTS_DIR.mkdir(parents=True, exist_ok=True)
+app.mount("/snapshots", StaticFiles(directory=str(config.SNAPSHOTS_DIR)), name="snapshots")
+
+
+def _mask_token(token: str | None) -> str:
+    if not token:
+        return "(없음)"
+    return f"{token[:4]}***** len={len(token)}"
+
 
 @app.on_event("startup")
 async def on_startup() -> None:
-    config.SNAPSHOTS_DIR.mkdir(parents=True, exist_ok=True)
     db.init_db()
+    logger.info("설정 요약 — robot token: %s", _mask_token(config.ROBOT_TOKEN))
+    logger.info("설정 요약 — dev mode: %s", "on" if config.DEV_MODE else "off")
+    logger.info("설정 요약 — data dir: %s", config.DATA_DIR.resolve())
 
 
 def _save_snapshot(event_id: str, image_b64: str) -> str | None:
@@ -92,18 +118,31 @@ async def _process_event(event: dict) -> dict:
 
     received_at = time.time()
     ts = event.get("ts", received_at)
+    x = event.get("x")
+    y = event.get("y")
+
+    zone_id = None
+    zone_name = None
+    severity = event.get("severity")
+    if x is not None and y is not None:
+        matched = geometry.zones_containing(x, y, db.list_zones())
+        if matched:
+            zone_id = matched[0]["id"]
+            zone_name = matched[0]["name"]
+            if matched[0]["severity"] == "danger":
+                severity = "danger"  # danger 구역 안이면 무조건 danger로 올린다 (내리진 않음)
+
     record = {
         "id": event_id,
         "robot_id": event.get("robot_id"),
         "type": event.get("type"),
-        "severity": event.get("severity"),
+        "severity": severity,
         "ts": ts,
         "received_at": received_at,
-        "x": event.get("x"),
-        "y": event.get("y"),
-        # 구역 판정은 geometry.py 단계에서 채운다 — 지금은 미판정
-        "zone_id": None,
-        "zone_name": None,
+        "x": x,
+        "y": y,
+        "zone_id": zone_id,
+        "zone_name": zone_name,
         "confidence": event.get("confidence"),
         "image_path": image_path,
     }
@@ -125,14 +164,109 @@ async def _handle_event(websocket: WebSocket, message: dict) -> None:
     await websocket.send_json(ack)
 
 
-def _check_robot_token(x_robot_token: str | None) -> None:
-    if not config.ROBOT_TOKEN or x_robot_token != config.ROBOT_TOKEN:
-        raise HTTPException(status_code=401, detail="invalid robot token")
+def _check_robot_token(received: str | None) -> bool:
+    """토큰이 맞으면 True. 틀리면 원인 추적용으로 마스킹된 값을 로그에 남기고 False."""
+    if config.ROBOT_TOKEN and received == config.ROBOT_TOKEN:
+        return True
+    logger.warning(
+        "로봇 토큰 불일치 — 받은 토큰 %s / 기대값 %s",
+        _mask_token(received),
+        _mask_token(config.ROBOT_TOKEN),
+    )
+    return False
 
 
 @app.get("/api/health")
 async def health() -> dict:
     return {"status": "ok"}
+
+
+@app.get("/")
+async def dashboard_page() -> FileResponse:
+    return FileResponse(config.BASE_DIR / "static" / "index.html")
+
+
+@app.get("/style.css")
+async def dashboard_style() -> FileResponse:
+    return FileResponse(config.BASE_DIR / "static" / "style.css")
+
+
+@app.get("/map.js")
+async def dashboard_map_js() -> FileResponse:
+    return FileResponse(config.BASE_DIR / "static" / "map.js")
+
+
+MAP_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg"}
+
+
+@app.get("/api/map")
+async def get_map() -> dict:
+    meta = geometry.load_map_meta(config.MAP_DIR)
+    return {"map": asdict(meta) if meta else None}
+
+
+@app.get("/api/map/image")
+async def get_map_image() -> FileResponse:
+    meta = geometry.load_map_meta(config.MAP_DIR)
+    if meta is None:
+        raise HTTPException(status_code=404, detail="map not found")
+    return FileResponse(config.MAP_DIR / meta.image)
+
+
+@app.post("/api/map")
+async def post_map(
+    image: UploadFile = File(...),
+    yaml_file: UploadFile = File(..., alias="yaml"),
+) -> dict:
+    """지도 이미지 + map.yaml 업로드 (SLAM 결과 갈아끼우기용). 이미지 파일명은 서버가 정한다."""
+    ext = Path(image.filename or "").suffix.lower()
+    if ext not in MAP_IMAGE_EXTENSIONS:
+        raise HTTPException(status_code=400, detail="지원하지 않는 이미지 형식 (png/jpg만 가능)")
+
+    try:
+        yaml_data = yaml.safe_load(await yaml_file.read()) or {}
+    except yaml.YAMLError as exc:
+        raise HTTPException(status_code=400, detail=f"map.yaml 파싱 실패: {exc}")
+
+    config.MAP_DIR.mkdir(parents=True, exist_ok=True)
+    # 갈아끼우는 것이므로 확장자가 다른 이전 지도 이미지가 남지 않게 정리한다
+    for old in config.MAP_DIR.glob("map.*"):
+        if old.suffix.lower() in MAP_IMAGE_EXTENSIONS:
+            old.unlink(missing_ok=True)
+
+    image_filename = f"map{ext}"
+    (config.MAP_DIR / image_filename).write_bytes(await image.read())
+
+    # 업로드된 yaml이 다른 파일명을 적어놨더라도, 실제로 저장한 이름으로 맞춘다
+    yaml_data["image"] = image_filename
+    with open(config.MAP_DIR / "map.yaml", "w", encoding="utf-8") as f:
+        yaml.safe_dump(yaml_data, f, allow_unicode=True)
+
+    meta = geometry.load_map_meta(config.MAP_DIR)
+    if meta is None:
+        raise HTTPException(status_code=500, detail="지도 저장 후 읽기 실패")
+
+    meta_dict = asdict(meta)
+    await hub.broadcast({"type": "map_updated", "map": meta_dict})
+    return {"map": meta_dict}
+
+
+@app.get("/api/events")
+async def get_events(
+    limit: int = 100,
+    type: str | None = None,
+    acked: bool | None = None,
+) -> list[dict]:
+    return db.list_events(limit=limit, type_=type, acked=acked)
+
+
+@app.post("/api/events/{event_id}/ack")
+async def post_ack_event(event_id: str) -> dict:
+    acked_by = "dashboard"  # 관리자 로그인이 아직 없어 고정값을 쓴다
+    if not db.ack_event(event_id, acked_by):
+        raise HTTPException(status_code=404, detail="event not found or already acked")
+    await hub.broadcast({"type": "event_acked", "id": event_id, "acked_by": acked_by})
+    return {"ok": True}
 
 
 @app.post("/api/events")
@@ -141,7 +275,8 @@ async def post_events(
     x_robot_token: str | None = Header(default=None, alias="X-Robot-Token"),
 ):
     """WebSocket이 막힌 환경용 폴백 (설계서 6-1). 배열로 보내면 버퍼 일괄 재전송으로 처리한다."""
-    _check_robot_token(x_robot_token)
+    if not _check_robot_token(x_robot_token):
+        raise HTTPException(status_code=401, detail="invalid robot token")
     if isinstance(payload, list):
         return [await _process_event(event) for event in payload]
     return await _process_event(payload)
@@ -153,7 +288,8 @@ async def post_robot_status(
     x_robot_token: str | None = Header(default=None, alias="X-Robot-Token"),
 ):
     """이벤트 없이 로봇 상태만 갱신한다 (개발용 테스트 콘솔의 '정상' 버튼)."""
-    _check_robot_token(x_robot_token)
+    if not _check_robot_token(x_robot_token):
+        raise HTTPException(status_code=401, detail="invalid robot token")
     if not payload.get("robot_id"):
         raise HTTPException(status_code=400, detail="robot_id가 필요하다")
     await _handle_telemetry(payload)
@@ -202,7 +338,7 @@ async def get_dev_sample(filename: str) -> FileResponse:
 
 @app.websocket("/ws/robot")
 async def ws_robot(websocket: WebSocket, token: str | None = Query(default=None)) -> None:
-    if not config.ROBOT_TOKEN or token != config.ROBOT_TOKEN:
+    if not _check_robot_token(token):
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
         return
 
@@ -234,13 +370,14 @@ async def ws_robot(websocket: WebSocket, token: str | None = Query(default=None)
 @app.websocket("/ws/dashboard")
 async def ws_dashboard(websocket: WebSocket) -> None:
     await hub.connect(websocket)
+    map_meta = geometry.load_map_meta(config.MAP_DIR)
     await websocket.send_json(
         {
             "type": "snapshot",
             "events": db.list_events(),
             "zones": db.list_zones(),
             "robots": db.list_robot_status(),
-            "map": None,
+            "map": asdict(map_meta) if map_meta else None,
         }
     )
     try:

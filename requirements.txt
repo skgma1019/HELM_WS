@@ -4,3 +4,4 @@ python-multipart
 websockets
 PyYAML
 Pillow
+python-dotenv
