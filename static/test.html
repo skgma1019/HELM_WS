@@ -84,8 +84,21 @@
   .value-label {
     font-size: 13px;
     color: #555;
-    min-width: 48px;
+    min-width: 56px;
     text-align: right;
+  }
+  .station-info {
+    font-size: 12px;
+    color: #666;
+    margin-top: 4px;
+  }
+  .judgement-preview {
+    font-family: "Consolas", monospace;
+    font-size: 12px;
+    background: #f0f0f0;
+    border-radius: 4px;
+    padding: 8px;
+    margin-top: 10px;
   }
   .row {
     display: flex;
@@ -94,12 +107,6 @@
   .row > div {
     flex: 1;
   }
-  .buttons {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 8px;
-    margin-top: 12px;
-  }
   button {
     padding: 10px;
     font-size: 14px;
@@ -107,11 +114,13 @@
     border: 1px solid #999;
     background: #f5f5f5;
     cursor: pointer;
+    width: 100%;
+    margin-top: 12px;
   }
   button:hover {
     background: #eaeaea;
   }
-  button.danger {
+  button.primary {
     border-color: #c0392b;
     color: #c0392b;
   }
@@ -157,17 +166,35 @@
 
   <label for="robotId">robot_id</label>
   <input type="text" id="robotId" value="helm-01" />
+</fieldset>
 
-  <div class="row">
-    <div>
-      <label for="x">x (m)</label>
-      <input type="number" id="x" value="3.0" step="0.1" />
-    </div>
-    <div>
-      <label for="y">y (m)</label>
-      <input type="number" id="y" value="3.0" step="0.1" />
-    </div>
+<fieldset>
+  <legend>순찰 지점 (station)</legend>
+  <label for="station">station</label>
+  <select id="station">
+    <option value="A">A — 1번 설비 전면</option>
+    <option value="B">B — 2번 설비 측면</option>
+    <option value="C">C — 적재장 통로</option>
+  </select>
+  <div class="station-info" id="stationInfo"></div>
+</fieldset>
+
+<fieldset>
+  <legend>판정 시뮬레이션 (이벤트 전송용)</legend>
+
+  <label for="visionScore">vision.score (threshold = 0.5)</label>
+  <div class="slider-row">
+    <input type="range" id="visionScore" min="0" max="1.5" step="0.01" value="0.3" />
+    <span class="value-label" id="visionScoreValue">0.30</span>
   </div>
+
+  <label for="thermalTemp">thermal.max_temp_c (threshold = 50.0°C)</label>
+  <div class="slider-row">
+    <input type="range" id="thermalTemp" min="20" max="80" step="0.5" value="35" />
+    <span class="value-label" id="thermalTempValue">35.0°C</span>
+  </div>
+
+  <div class="judgement-preview" id="judgementPreview"></div>
 
   <label>사진 첨부 (선택)</label>
   <div class="radio-row">
@@ -184,10 +211,12 @@
   <div class="photo-mode-panel" id="filePanel" style="display: none">
     <input type="file" id="image" accept="image/*" />
   </div>
+
+  <button class="primary" id="btn-send-event">이벤트 전송</button>
 </fieldset>
 
 <fieldset>
-  <legend>로봇 상태 ("정상" 버튼으로 전송)</legend>
+  <legend>로봇 상태 갱신 (이벤트 없음 — station 위치 그대로 사용)</legend>
   <label for="state">state</label>
   <select id="state">
     <option value="patrolling">patrolling</option>
@@ -202,21 +231,13 @@
     <span class="value-label" id="batteryValue">80%</span>
   </div>
 
-  <label for="yaw">yaw (지도 위 로봇 방향 확인용)</label>
+  <label for="yaw">yaw (지도 위 로봇 방향 확인용, station의 yaw와 별개)</label>
   <div class="slider-row">
     <input type="range" id="yaw" min="0" max="360" step="1" value="0" />
     <span class="value-label" id="yawValue">0°</span>
   </div>
-</fieldset>
 
-<fieldset>
-  <legend>이벤트 전송</legend>
-  <div class="buttons">
-    <button class="danger" id="btn-no-helmet">안전모 미착용</button>
-    <button class="danger" id="btn-zone">위험구역 침입</button>
-    <button class="danger" id="btn-estop">로봇 비상정지</button>
-    <button class="ok" id="btn-normal">정상 (안전모 착용)</button>
-  </div>
+  <button class="ok" id="btn-normal">상태 갱신</button>
 </fieldset>
 
 <fieldset>
@@ -226,6 +247,44 @@
 
 <script>
   const $ = (id) => document.getElementById(id);
+
+  // mock_robot.py의 STATIONS와 같은 좌표 — 서로 다른 방식으로 테스트해도 지도 위에서 같은 자리에 찍히게
+  const STATIONS = [
+    { id: "A", name: "1번 설비 전면", x: 1.0, y: 1.0, yaw: 0.0 },
+    { id: "B", name: "2번 설비 측면", x: 8.0, y: 1.0, yaw: Math.PI / 2 },
+    { id: "C", name: "적재장 통로", x: 8.0, y: 6.0, yaw: Math.PI },
+  ];
+  const VISION_THRESHOLD = 0.5;
+  const THERMAL_THRESHOLD_C = 50.0;
+
+  let seqCounter = 0;
+
+  function currentStation() {
+    return STATIONS.find((s) => s.id === $("station").value) || STATIONS[0];
+  }
+
+  function updateStationInfo() {
+    const st = currentStation();
+    $("stationInfo").textContent = `x=${st.x.toFixed(2)}  y=${st.y.toFixed(2)}  yaw=${st.yaw.toFixed(2)}rad`;
+  }
+
+  function updateJudgementPreview() {
+    const score = parseFloat($("visionScore").value);
+    const temp = parseFloat($("thermalTemp").value);
+    $("visionScoreValue").textContent = score.toFixed(2);
+    $("thermalTempValue").textContent = `${temp.toFixed(1)}°C`;
+
+    const visionAnomaly = score >= VISION_THRESHOLD;
+    const thermalAnomaly = temp >= THERMAL_THRESHOLD_C;
+    const verdict = visionAnomaly || thermalAnomaly ? "ANOMALY" : "NORMAL";
+    const ratio = (score / VISION_THRESHOLD).toFixed(2);
+    $("judgementPreview").textContent =
+      `ratio=${ratio}  vision=${visionAnomaly ? "이상" : "정상"}  thermal=${thermalAnomaly ? "이상" : "정상"}  →  verdict=${verdict}`;
+  }
+
+  $("station").addEventListener("change", updateStationInfo);
+  $("visionScore").addEventListener("input", updateJudgementPreview);
+  $("thermalTemp").addEventListener("input", updateJudgementPreview);
 
   function loadSaved() {
     $("token").value = localStorage.getItem("helm_dev_token") || "";
@@ -280,8 +339,7 @@
         option.textContent = name;
         select.appendChild(option);
       }
-      // "안전모 미착용" 테스트가 제일 잦으니 있으면 기본으로 골라둔다
-      select.value = samples.includes("helmet_off.jpg") ? "helmet_off.jpg" : samples[0];
+      select.value = samples[0];
     } catch (err) {
       select.style.display = "none";
       empty.style.display = "block";
@@ -308,7 +366,6 @@
       return file ? blobToBase64(file) : null;
     }
 
-    // 샘플 사용
     const filename = $("sampleSelect").value;
     if (!filename) return null; // 샘플 없음 -> 사진 없이 전송
     const res = await fetch(`/api/dev/samples/${encodeURIComponent(filename)}`);
@@ -323,31 +380,55 @@
   function getCommonFields() {
     const token = $("token").value.trim();
     const robotId = $("robotId").value.trim() || "helm-01";
-    const x = parseFloat($("x").value);
-    const y = parseFloat($("y").value);
-    return { token, robotId, x, y };
+    return { token, robotId };
   }
 
-  async function sendEvent(type, severity) {
-    const { token, robotId, x, y } = getCommonFields();
+  async function sendEvent() {
+    const { token, robotId } = getCommonFields();
     if (!token) {
       log("토큰을 먼저 입력하세요", false);
       return;
     }
 
+    const station = currentStation();
+    const score = parseFloat($("visionScore").value);
+    const temp = parseFloat($("thermalTemp").value);
+    const visionAnomaly = score >= VISION_THRESHOLD;
+    const thermalAnomaly = temp >= THERMAL_THRESHOLD_C;
+    const verdict = visionAnomaly || thermalAnomaly ? "ANOMALY" : "NORMAL";
+    const triggeredBy = [];
+    if (visionAnomaly) triggeredBy.push("vision");
+    if (thermalAnomaly) triggeredBy.push("thermal");
+
     const id = crypto.randomUUID(); // 이벤트 id는 로봇(여기서는 이 페이지)이 만든다 — 서버는 새로 만들지 않는다
     const event = {
       id,
       robot_id: robotId,
-      type,
-      severity,
-      ts: Date.now() / 1000,
-      x,
-      y,
+      station_id: station.id,
+      station_name: station.name,
+      seq: ++seqCounter,
+      ts: Date.now() / 1000, // 로봇은 epoch 숫자로 보낸다 (CLAUDE.md 연동 규격)
+      x: station.x,
+      y: station.y,
+      yaw: station.yaw,
+      pose_error: {
+        pos_m: Number((Math.random() * 0.05).toFixed(4)),
+        yaw_rad: Number((Math.random() * 0.03).toFixed(4)),
+      },
+      verdict,
+      triggered_by: triggeredBy,
+      vision: {
+        is_anomaly: visionAnomaly,
+        score,
+        threshold: VISION_THRESHOLD,
+        regions: visionAnomaly ? [{ bbox: [200, 150, 120, 100], area_px: 120 * 100 }] : [],
+      },
+      thermal: {
+        is_anomaly: thermalAnomaly,
+        max_temp_c: temp,
+        threshold_c: THERMAL_THRESHOLD_C,
+      },
     };
-    if (type === "no_helmet") {
-      event.confidence = 0.9;
-    }
 
     const imageB64 = await getImageBase64();
     if (imageB64) {
@@ -362,32 +443,36 @@
       });
       const data = await res.json().catch(() => null);
       if (!res.ok) {
-        log(`${type} 전송 실패 (HTTP ${res.status}): ${JSON.stringify(data)}`, false);
+        log(`전송 실패 (HTTP ${res.status}): ${JSON.stringify(data)}`, false);
         return;
       }
-      log(`${type} 전송 성공 id=${id.slice(0, 8)} duplicate=${data.duplicate}`, true);
+      log(
+        `${station.name} 전송 성공 verdict=${verdict} id=${id.slice(0, 8)} duplicate=${data.duplicate}`,
+        true
+      );
     } catch (err) {
-      log(`${type} 전송 오류: ${err}`, false);
+      log(`전송 오류: ${err}`, false);
     }
   }
 
   async function sendNormalStatus() {
-    const { token, robotId, x, y } = getCommonFields();
+    const { token, robotId } = getCommonFields();
     if (!token) {
       log("토큰을 먼저 입력하세요", false);
       return;
     }
 
+    const station = currentStation();
     const state = $("state").value;
     const battery = parseFloat($("battery").value);
     const yawDeg = parseFloat($("yaw").value);
-    const yaw = (yawDeg * Math.PI) / 180; // 프로토콜은 라디안 (설계서 6-1 telemetry 예시 참고)
+    const yaw = (yawDeg * Math.PI) / 180; // 프로토콜은 라디안
 
     try {
       const res = await fetch("/api/robot/status", {
         method: "POST",
         headers: { "Content-Type": "application/json", "X-Robot-Token": token },
-        body: JSON.stringify({ robot_id: robotId, x, y, yaw, battery, state }),
+        body: JSON.stringify({ robot_id: robotId, x: station.x, y: station.y, yaw, battery, state }),
       });
       const data = await res.json().catch(() => null);
       if (!res.ok) {
@@ -400,14 +485,14 @@
     }
   }
 
-  $("btn-no-helmet").addEventListener("click", () => sendEvent("no_helmet", "danger"));
-  $("btn-zone").addEventListener("click", () => sendEvent("zone_intrusion", "danger"));
-  $("btn-estop").addEventListener("click", () => sendEvent("robot_estop", "danger"));
+  $("btn-send-event").addEventListener("click", sendEvent);
   $("btn-normal").addEventListener("click", sendNormalStatus);
 
   loadSaved();
   setupPhotoModeToggle();
   loadSampleList();
+  updateStationInfo();
+  updateJudgementPreview();
 </script>
 </body>
 </html>
