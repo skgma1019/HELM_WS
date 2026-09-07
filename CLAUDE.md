@@ -5,12 +5,28 @@
 
 ## 프로젝트
 
-산업현장 안전 점검 자율주행 로봇(HELM)의 **관제 서버 + 웹 대시보드**.
-로봇(Jetson)이 안전모 미착용·위험구역 침입을 감지하면 사진·위치·시간을 서버로 보내고,
-서버는 접속 중인 관리자 PC 화면에 새로고침 없이 알림을 띄운다.
+산업현장 안전 점검 자율순찰 로봇(HELM)의 **관제 서버 + 웹 대시보드**.
+로봇(Jetson)이 지정된 순찰 지점에서 설비를 점검하고, 평소와 다른 상태가 감지되면
+사진·위치·시간·이상영역을 서버로 보낸다. 서버는 접속 중인 관리자 PC 화면에
+새로고침 없이 알림을 띄운다.
 
-담당: 이나흠 (웹/서버). 로봇 SLAM과 AI 탐지는 별도 개발.
+담당: 이나흠 (웹/서버). 로봇 SLAM은 이강건, 이상 판정 모델은 김유찬.
 기간: 2026-08-18 ~ 09-18. **하드웨어 미완성이라 가짜 로봇으로 개발한다.**
+
+## 탐지 방식 — 이걸 오해하면 전부 어긋난다
+
+**이상의 "종류"를 분류하지 않는다.** 이름표를 붙이지 않는다.
+
+- 순찰 지점(station)마다 정상 상태를 학습한 Memory Bank를 따로 둔다 (PatchCore/anomalib)
+- 로봇은 지점에 도착해 정지한 뒤 촬영하고, **학습된 정상 상태와 다른지만** 판정한다
+- 다르면 **달라진 영역을 사각형으로 표시**해 사진과 함께 보낸다
+- 그게 무엇인지에 대한 최종 판단은 **관리자가 한다**
+- 열화상(MLX90640)으로 표면 과열을 별도 판정. vision·thermal 중 하나라도 이상이면 ANOMALY
+
+따라서 화면은 **"무엇이 감지되었는가"가 아니라 "어디가 평소와 다른가"** 를 보여준다.
+
+> 폐기된 전제 — 다시 꺼내지 말 것: YOLO 객체탐지, 안전모 미착용 판정,
+> 화재·연기 전용 탐지, 이상 종류 자동 분류, LiDAR를 이상탐지에 사용
 
 ## 스택 (변경 금지)
 
@@ -24,7 +40,7 @@
 1. **좌표는 월드 좌표(m)로 저장한다.** 픽셀로 저장하면 지도를 다시 뜨는 순간 전부 어긋난다.
 2. **이미지 y축은 뒤집혀 있다.** `world_y = origin_y + (height - py) * resolution`.
    `height -`를 빠뜨리면 로봇이 지도 위아래로 뒤집혀 움직인다.
-3. **이벤트 `id`는 로봇이 만든 UUID를 그대로 쓴다.** 서버는 `INSERT OR IGNORE`.
+3. **이벤트 `id`는 로봇이 만든다.** 서버는 `INSERT OR IGNORE`.
    오프라인 버퍼 재전송 시 중복을 이걸로 거른다. 서버가 id를 새로 만들면 이 설계가 깨진다.
 4. **SQL은 `app/db.py` 밖으로 새지 않는다.** ORM 도입 금지.
 5. **WebSocket URL은 페이지 프로토콜을 따라간다.**
@@ -37,19 +53,36 @@
 ```
 app/     main.py(라우팅·WS) config.py db.py(SQL 전용) geometry.py(좌표·판정) hub.py(broadcast)
 static/  index.html(대시보드) zones.html(구역편집기) map.js(지도렌더러·공용) style.css
-data/    helm.db, map/(map.png+map.yaml), snapshots/   ← .gitignore
+data/    helm.db, map/(map.png+map.pgm+map.yaml), snapshots/   ← .gitignore
 tools/   mock_robot.py (하드웨어 대신 쓰는 가짜 로봇)
 ```
 
-## 로봇 ↔ 서버 연동 규격 (팀원과의 계약 — 임의 변경 금지)
+## 로봇 ↔ 서버 연동 규격
+
+**팀원과의 계약이다. 이 파일과 함께 고칠 때만 바꾼다.**
 
 로봇 → `WebSocket /ws/robot?token=<토큰>`
 
 ```json
 {"type":"hello","robot_id":"helm-01"}
-{"type":"telemetry","robot_id":"helm-01","x":3.42,"y":-1.15,"yaw":1.57,"battery":78.0,"state":"patrolling"}
-{"type":"event","event":{"id":"<UUID>","robot_id":"helm-01","type":"no_helmet",
-  "severity":"danger","ts":1755648012.3,"x":3.42,"y":-1.15,"confidence":0.91,"image_b64":"<JPEG>"}}
+
+{"type":"telemetry","robot_id":"helm-01","x":3.42,"y":-1.15,"yaw":1.57,
+ "battery":78.0,"state":"patrolling"}
+
+{"type":"event","event":{
+  "id":"20260914-2147-A-001",
+  "robot_id":"helm-01",
+  "station_id":"A", "station_name":"1번 설비 전면", "seq":1,
+  "ts":1755648012.345,
+  "x":1.26, "y":0.35, "yaw":1.55,
+  "pose_error":{"pos_m":0.028,"yaw_rad":0.021},
+  "verdict":"ANOMALY",
+  "triggered_by":["vision"],
+  "vision":{"is_anomaly":true,"score":0.87,"threshold":0.62,
+            "regions":[{"bbox":[412,233,96,140],"area_px":13440}]},
+  "thermal":{"is_anomaly":false,"max_temp_c":43.2,"threshold_c":50.0},
+  "image_b64":"<사각형이 그려진 JPEG>"
+}}
 ```
 
 서버 응답: `hello`→`{"type":"welcome","zones":[...]}`, `event`→`{"type":"ack","id":...,"duplicate":false}`
@@ -59,8 +92,32 @@ tools/   mock_robot.py (하드웨어 대신 쓰는 가짜 로봇)
 접속 즉시 `{"type":"snapshot", events/zones/robots/map}` 1회, 이후 변화분만 push:
 `event` / `event_acked` / `telemetry` / `robot_online` / `robot_offline` / `zones_updated` / `map_updated`
 
-`state`: `patrolling|idle|estop|charging` · `severity`: `danger|caution|info`
-`type`: `no_helmet|zone_intrusion|robot_estop|low_battery`
+### 어휘
+
+- `state`: `patrolling|idle|estop|charging`
+- `verdict`: `NORMAL|ANOMALY`
+- `triggered_by`: `vision` / `thermal` 의 배열 (채널이 늘어도 형식이 안 깨지게 배열)
+- `severity`: `danger|caution|info` — **서버가 계산한다.** 로봇은 보내지 않는다
+
+### severity 산정 (서버 책임)
+
+```
+verdict == NORMAL                              → info
+ratio = vision.score / vision.threshold
+  1.0 <= ratio < 1.3                           → caution
+  ratio >= 1.3                                 → danger
+thermal.max_temp_c - threshold_c >= 10         → danger
+vision·thermal 동시 이상                        → danger
+그 다음 기존 구역 기반 상향 로직 적용
+```
+
+임계값 1.0 / 1.3 / 10.0 은 **실측 전 임시값**이다. `config.py`에서 읽는다. 하드코딩 금지.
+
+### 이벤트 규모
+
+순찰 지점 3곳 × 하루 몇 회. **NORMAL도 저장한다** — 순찰 이력이 곧 발표 근거다.
+다만 대시보드 알림 목록은 `verdict='ANOMALY'` 를 기본 필터로 쓴다.
+정상 지점은 지도에 별도 마커로만 표시한다.
 
 ## 코딩 컨벤션
 
