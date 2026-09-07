@@ -23,7 +23,7 @@ const context = {
   },
   window: {}, location: { protocol: 'https:', host: 'localhost' },
   WebSocket: class { addEventListener() {} },
-  MapView: class { loadMap() {} setEvents(events) { this.events = events; } updateRobot() {} },
+  MapView: class { loadMap() {} setEvents(events) { this.events = events; } setZones(zones) { this.zones = zones; } updateRobot() {} },
   setTimeout() {}, setInterval() {}, console,
 };
 vm.createContext(context);
@@ -52,6 +52,7 @@ elements.showAllToggle.checked = false;
 elements.showAllToggle.listeners.change();
 assert.equal(elements.alertList.children.length, 2);
 assert.equal(run('mapView.events.length'), 4);
+assert.equal(run('Array.isArray(mapView.zones)'), true);
 run(`handleSnapshot({events:[{id:'b',station_id:'B',verdict:'NORMAL',ts:Date.now()/1000}]})`);
 assert.equal(elements.alertList.children[0].className, 'alert-empty');
 
@@ -61,15 +62,17 @@ vm.runInContext(fs.readFileSync('static/map.js', 'utf8'), mapContext);
 vm.runInContext(`
   const view = Object.create(MapView.prototype);
   view.worldToScreen = (x,y) => [x,y];
+  view.zones = [{name:'keepout', points:[[0,0],[1,0],[1,1]]}];
   view.events = [{x:1,y:2,station_id:'A',verdict:'NORMAL'},
     {x:3,y:4,verdict:'ANOMALY',severity:'caution',ts:Date.now()/1000}];
-  let diamonds=0, arcs=0, labels=0;
+  let diamonds=0, arcs=0, labels=0, zoneLabels=0;
   const ctx = new Proxy({}, {get:(_,key)=>()=>{
     if(key==='closePath') diamonds++;
     if(key==='arc') arcs++;
-    if(key==='fillText') labels++;
+    if(key==='fillText') { labels++; zoneLabels++; }
   },set:()=>true});
+  view._drawZones(ctx);
   view._drawEvents(ctx);
-  if(diamonds!==1 || arcs!==2 || labels!==1) throw Error('marker regression');
+  if(diamonds!==2 || arcs!==5 || labels!==2 || zoneLabels!==2) throw Error('marker regression');
 `, mapContext);
 console.log('frontend regression checks passed');

@@ -20,9 +20,10 @@ from fastapi import (
     status,
 )
 from fastapi.responses import FileResponse
+from fastapi.responses import Response
 from fastapi.staticfiles import StaticFiles
 
-from app import config, db, geometry
+from app import config, db, geometry, nav2
 from app.hub import hub
 
 logging.basicConfig(level=logging.INFO)
@@ -250,6 +251,11 @@ async def dashboard_map_js() -> FileResponse:
     return FileResponse(config.BASE_DIR / "static" / "map.js")
 
 
+@app.get("/zones.html")
+async def zones_page() -> FileResponse:
+    return FileResponse(config.BASE_DIR / "static" / "zones.html")
+
+
 MAP_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg"}
 
 
@@ -312,6 +318,64 @@ async def get_events(
     acked: bool | None = None,
 ) -> list[dict]:
     return db.list_events(limit=limit, verdict=verdict, acked=acked)
+
+
+def _normalize_zone(zone: dict, index: int) -> dict:
+    points = zone.get("points")
+    if not isinstance(points, list) or len(points) < 3:
+        raise HTTPException(status_code=400, detail="polygon points가 3개 이상 필요하다")
+    normalized_points = []
+    for point in points:
+        if not isinstance(point, list | tuple) or len(point) != 2:
+            raise HTTPException(status_code=400, detail="points는 [x, y] 배열이어야 한다")
+        normalized_points.append([float(point[0]), float(point[1])])
+    return {
+        "id": str(zone.get("id") or f"zone-{index + 1}"),
+        "name": str(zone.get("name") or f"금지구역 {index + 1}"),
+        "note": zone.get("note"),
+        "kind": "polygon",
+        "severity": str(zone.get("severity") or "danger"),
+        "points": normalized_points,
+        "center": None,
+        "radius": None,
+    }
+
+
+@app.get("/api/zones")
+async def get_zones() -> list[dict]:
+    return db.list_zones()
+
+
+@app.put("/api/zones")
+async def put_zones(payload: list[dict]) -> dict:
+    zones = [_normalize_zone(zone, index) for index, zone in enumerate(payload)]
+    db.replace_zones(zones)
+    await hub.broadcast({"type": "zones_updated", "zones": zones})
+    return {"zones": zones}
+
+
+@app.get("/api/nav2/keepout_mask.pgm")
+async def get_keepout_mask_pgm() -> Response:
+    meta = geometry.load_map_meta(config.MAP_DIR)
+    if meta is None:
+        raise HTTPException(status_code=404, detail="map not found")
+    return Response(
+        content=nav2.build_keepout_mask_pgm(meta, db.list_zones()),
+        media_type="image/x-portable-graymap",
+        headers={"Content-Disposition": 'attachment; filename="keepout_mask.pgm"'},
+    )
+
+
+@app.get("/api/nav2/keepout_mask.yaml")
+async def get_keepout_mask_yaml() -> Response:
+    meta = geometry.load_map_meta(config.MAP_DIR)
+    if meta is None:
+        raise HTTPException(status_code=404, detail="map not found")
+    return Response(
+        content=nav2.build_keepout_mask_yaml(meta),
+        media_type="application/x-yaml",
+        headers={"Content-Disposition": 'attachment; filename="keepout_mask.yaml"'},
+    )
 
 
 @app.post("/api/events/{event_id}/ack")

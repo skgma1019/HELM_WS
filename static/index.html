@@ -285,6 +285,7 @@
       mapView.updateRobot(r.robot_id, { x: r.x, y: r.y, yaw: r.yaw });
     }
 
+    mapView.setZones(msg.zones || []);
     mapView.setEvents([...eventsById.values()]);
     updateTiles();
     updateRobotStatus();
@@ -326,6 +327,10 @@
     mapView.reloadImage();
   }
 
+  function handleZonesUpdated(msg) {
+    mapView.setZones(msg.zones || []);
+  }
+
   function dispatchMessage(msg) {
     switch (msg.type) {
       case "snapshot":
@@ -343,8 +348,11 @@
       case "map_updated":
         handleMapUpdated(msg);
         break;
+      case "zones_updated":
+        handleZonesUpdated(msg);
+        break;
       default:
-        break; // robot_online/offline, zones_updated 등은 다음 단계에서
+        break; // robot_online/offline 등은 다음 단계에서
     }
   }
 

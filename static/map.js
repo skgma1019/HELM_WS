@@ -15,6 +15,8 @@ const HELM_SEVERITY_COLORS = {
 };
 
 const HELM_NORMAL_COLOR = "#3ecf7e";
+const HELM_ZONE_FILL = "rgba(255, 92, 92, 0.18)";
+const HELM_ZONE_STROKE = "rgba(255, 92, 92, 0.9)";
 const HELM_MAX_TRAIL_POINTS = 300;
 const HELM_RECENT_EVENT_SEC = 30; // 이 시간 안의 미확인 이벤트는 링으로 강조
 
@@ -47,6 +49,7 @@ class MapView {
 
     this.robots = {}; // robot_id -> {x, y, yaw, trail: [{x,y}]}
     this.events = []; // 서버 이벤트 레코드 배열 (렌더 시점에 _screenX/_screenY를 덧붙인다)
+    this.zones = []; // 월드 좌표 polygon 구역
 
     this._dpr = window.devicePixelRatio || 1;
     this._hasFitOnce = false;
@@ -141,6 +144,11 @@ class MapView {
 
   setEvents(events) {
     this.events = events;
+    this.render();
+  }
+
+  setZones(zones) {
+    this.zones = zones || [];
     this.render();
   }
 
@@ -286,6 +294,7 @@ class MapView {
       ctx.restore();
     }
 
+    this._drawZones(ctx);
     this._drawTrails(ctx);
     this._drawEvents(ctx);
     this._drawRobots(ctx);
@@ -305,6 +314,44 @@ class MapView {
         else ctx.lineTo(sx, sy);
       });
       ctx.stroke();
+    }
+  }
+
+  _drawZones(ctx) {
+    for (const zone of this.zones) {
+      if (!zone.points || zone.points.length === 0) continue;
+      ctx.beginPath();
+      zone.points.forEach(([x, y], index) => {
+        const [sx, sy] = this.worldToScreen(x, y);
+        if (index === 0) ctx.moveTo(sx, sy);
+        else ctx.lineTo(sx, sy);
+      });
+      if (zone.points.length >= 3) {
+        ctx.closePath();
+        ctx.fillStyle = HELM_ZONE_FILL;
+        ctx.fill();
+      }
+      ctx.strokeStyle = HELM_ZONE_STROKE;
+      ctx.lineWidth = 2;
+      ctx.stroke();
+
+      for (const [x, y] of zone.points) {
+        const [sx, sy] = this.worldToScreen(x, y);
+        ctx.beginPath();
+        ctx.arc(sx, sy, 3, 0, Math.PI * 2);
+        ctx.fillStyle = HELM_ZONE_STROKE;
+        ctx.fill();
+      }
+
+      const [labelX, labelY] = this.worldToScreen(zone.points[0][0], zone.points[0][1]);
+      ctx.font = "12px -apple-system, sans-serif";
+      ctx.textAlign = "left";
+      ctx.textBaseline = "bottom";
+      ctx.lineWidth = 3;
+      ctx.strokeStyle = "#0f1216";
+      ctx.fillStyle = "#ffb3b3";
+      ctx.strokeText(zone.name || "금지구역", labelX + 4, labelY - 4);
+      ctx.fillText(zone.name || "금지구역", labelX + 4, labelY - 4);
     }
   }
 
