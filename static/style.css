@@ -99,7 +99,7 @@ body {
 
 .tiles {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  grid-template-columns: repeat(5, 1fr);
   gap: 12px;
   padding: 16px 20px;
 }
@@ -236,6 +236,26 @@ body {
   flex-direction: column;
   gap: 8px;
 }
+
+.alerts-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+.alerts-header h2 { margin: 0; }
+.filter-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+.filter-toggle input { accent-color: var(--accent); }
+.station-id { color: var(--text-muted); font-weight: 400; }
 
 .alert-empty {
   color: var(--text-muted);

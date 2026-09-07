@@ -14,6 +14,7 @@ const HELM_SEVERITY_COLORS = {
   info: "#4ea1ff",
 };
 
+const HELM_NORMAL_COLOR = "#3ecf7e";
 const HELM_MAX_TRAIL_POINTS = 300;
 const HELM_RECENT_EVENT_SEC = 30; // 이 시간 안의 미확인 이벤트는 링으로 강조
 
@@ -318,6 +319,10 @@ class MapView {
       const [sx, sy] = this.worldToScreen(ev.x, ev.y);
       ev._screenX = sx;
       ev._screenY = sy;
+      if (ev.verdict === "NORMAL") {
+        this._drawNormalMarker(ctx, sx, sy, ev.station_id);
+        continue;
+      }
       const color = HELM_SEVERITY_COLORS[ev.severity] || HELM_SEVERITY_COLORS.info;
 
       ctx.beginPath();
@@ -337,6 +342,29 @@ class MapView {
         ctx.stroke();
       }
     }
+  }
+
+  _drawNormalMarker(ctx, sx, sy, stationId) {
+    ctx.save();
+    ctx.beginPath();
+    ctx.moveTo(sx, sy - 6);
+    ctx.lineTo(sx + 6, sy);
+    ctx.lineTo(sx, sy + 6);
+    ctx.lineTo(sx - 6, sy);
+    ctx.closePath();
+    ctx.fillStyle = HELM_NORMAL_COLOR;
+    ctx.fill();
+    ctx.strokeStyle = "#0f1216";
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+    ctx.font = "12px -apple-system, sans-serif";
+    ctx.textAlign = "left";
+    ctx.textBaseline = "middle";
+    const label = `${stationId || "-"} 정상`;
+    ctx.lineWidth = 3;
+    ctx.strokeText(label, sx + 10, sy);
+    ctx.fillText(label, sx + 10, sy);
+    ctx.restore();
   }
 
   _drawRobots(ctx) {
