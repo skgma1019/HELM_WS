@@ -24,3 +24,8 @@ ROBOT_TOKEN = os.environ.get("HELM_ROBOT_TOKEN")
 
 # 개발용 테스트 콘솔(static/test.html) 서빙 여부. EC2 배포본엔 절대 세우면 안 된다
 DEV_MODE = os.environ.get("HELM_DEV") == "1"
+
+# severity 산정 임계값. 실측 전 임시값이라 하드코딩하지 않고 여기서만 관리한다 (CLAUDE.md 참고)
+SEVERITY_RATIO_CAUTION = float(os.environ.get("HELM_SEVERITY_RATIO_CAUTION", "1.0"))
+SEVERITY_RATIO_DANGER = float(os.environ.get("HELM_SEVERITY_RATIO_DANGER", "1.3"))
+THERMAL_OVERSHOOT_DANGER_C = float(os.environ.get("HELM_THERMAL_OVERSHOOT_DANGER_C", "10.0"))

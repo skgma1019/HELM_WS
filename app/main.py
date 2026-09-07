@@ -102,6 +102,38 @@ async def _handle_telemetry(message: dict) -> None:
     )
 
 
+def _compute_severity(event: dict) -> str:
+    """CLAUDE.md 연동 규격의 severity 산정 규칙. 로봇은 severity를 보내지 않는다 — 서버가 계산한다.
+
+    구역 기반 상향(danger 구역 안이면 danger)은 이 함수 밖(_process_event)에서 따로 적용한다.
+    임계값은 실측 전 임시값이라 config.py에서 읽는다 (하드코딩 금지).
+    """
+    if event.get("verdict") != "ANOMALY":
+        return "info"
+
+    vision = event.get("vision") or {}
+    thermal = event.get("thermal") or {}
+
+    score = vision.get("score")
+    threshold = vision.get("threshold")
+    ratio = (score / threshold) if (score is not None and threshold) else 0.0
+
+    max_temp = thermal.get("max_temp_c")
+    temp_threshold = thermal.get("threshold_c")
+    overshoot = (max_temp - temp_threshold) if (max_temp is not None and temp_threshold is not None) else None
+
+    both_anomaly = bool(vision.get("is_anomaly")) and bool(thermal.get("is_anomaly"))
+
+    if ratio >= config.SEVERITY_RATIO_DANGER:
+        return "danger"
+    if overshoot is not None and overshoot >= config.THERMAL_OVERSHOOT_DANGER_C:
+        return "danger"
+    if both_anomaly:
+        return "danger"
+    # ANOMALY인 이상 위 조건에 안 걸려도(예: thermal만 threshold를 살짝 넘김) 최소 caution은 준다
+    return "caution"
+
+
 async def _process_event(event: dict) -> dict:
     """이벤트 하나를 저장하고, 새 이벤트면 대시보드로 broadcast한다.
 
@@ -111,19 +143,24 @@ async def _process_event(event: dict) -> dict:
     if not event_id:
         raise ValueError("event.id가 없다")
 
+    ts = event.get("ts")
+    if ts is None:
+        raise ValueError("event.ts가 없다")
+    ts = float(ts)  # 로봇은 epoch 숫자로 보낸다 (CLAUDE.md 연동 규격) — 조용히 넘어가지 않는다
+
     image_path = None
     image_b64 = event.get("image_b64")
     if image_b64:
         image_path = _save_snapshot(event_id, image_b64)
 
     received_at = time.time()
-    ts = event.get("ts", received_at)
     x = event.get("x")
     y = event.get("y")
 
+    severity = _compute_severity(event)
+
     zone_id = None
     zone_name = None
-    severity = event.get("severity")
     if x is not None and y is not None:
         matched = geometry.zones_containing(x, y, db.list_zones())
         if matched:
@@ -132,18 +169,35 @@ async def _process_event(event: dict) -> dict:
             if matched[0]["severity"] == "danger":
                 severity = "danger"  # danger 구역 안이면 무조건 danger로 올린다 (내리진 않음)
 
+    vision = event.get("vision") or {}
+    thermal = event.get("thermal") or {}
+    pose_error = event.get("pose_error") or {}
+
     record = {
         "id": event_id,
         "robot_id": event.get("robot_id"),
-        "type": event.get("type"),
+        "station_id": event.get("station_id"),
+        "station_name": event.get("station_name"),
+        "seq": event.get("seq"),
         "severity": severity,
+        "verdict": event.get("verdict"),
         "ts": ts,
         "received_at": received_at,
         "x": x,
         "y": y,
+        "yaw": event.get("yaw"),
+        "pose_pos_error_m": pose_error.get("pos_m"),
+        "pose_yaw_error_rad": pose_error.get("yaw_rad"),
+        "triggered_by": event.get("triggered_by") or [],
+        "vision_is_anomaly": vision.get("is_anomaly"),
+        "vision_score": vision.get("score"),
+        "vision_threshold": vision.get("threshold"),
+        "vision_regions": vision.get("regions") or [],
+        "thermal_is_anomaly": thermal.get("is_anomaly"),
+        "thermal_max_temp_c": thermal.get("max_temp_c"),
+        "thermal_threshold_c": thermal.get("threshold_c"),
         "zone_id": zone_id,
         "zone_name": zone_name,
-        "confidence": event.get("confidence"),
         "image_path": image_path,
     }
     is_new = db.insert_event(record)
@@ -254,10 +308,10 @@ async def post_map(
 @app.get("/api/events")
 async def get_events(
     limit: int = 100,
-    type: str | None = None,
+    verdict: str | None = None,
     acked: bool | None = None,
 ) -> list[dict]:
-    return db.list_events(limit=limit, type_=type, acked=acked)
+    return db.list_events(limit=limit, verdict=verdict, acked=acked)
 
 
 @app.post("/api/events/{event_id}/ack")
