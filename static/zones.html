@@ -1,0 +1,276 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>HELM 금지구역 편집기</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header class="topbar">
+  <h1>HELM 금지구역 편집기</h1>
+  <div class="status-group">
+    <a class="nav-link" href="/">관제 화면</a>
+    <span class="status-pill status-unknown" id="saveStatus"><span class="dot"></span><span class="status-text">변경 없음</span></span>
+  </div>
+</header>
+
+<main class="zone-editor">
+  <section class="map-panel">
+    <div class="map-panel-header">
+      <h2>지도</h2>
+      <div class="zone-toolbar">
+        <button class="fit-btn" id="startDrawBtn" type="button">금지구역 추가</button>
+        <button class="fit-btn" id="finishDrawBtn" type="button" disabled>완료</button>
+        <button class="fit-btn" id="cancelDrawBtn" type="button" disabled>취소</button>
+        <button class="fit-btn" id="fitMapBtn" type="button">맞춤</button>
+      </div>
+    </div>
+    <div class="map-canvas-wrap">
+      <canvas id="mapCanvas"></canvas>
+    </div>
+  </section>
+
+  <aside class="zone-sidebar">
+    <div class="zone-sidebar-header">
+      <h2>구역 목록</h2>
+      <button class="ack-btn" id="saveZonesBtn" type="button">저장</button>
+    </div>
+    <p class="zone-help" id="drawHint">금지구역 추가를 누른 뒤 지도 위 점을 3개 이상 찍고 완료하세요.</p>
+    <div class="zone-list" id="zoneList"></div>
+    <div class="zone-downloads">
+      <a class="fit-btn" href="/api/nav2/keepout_mask.pgm" download>PGM 다운로드</a>
+      <a class="fit-btn" href="/api/nav2/keepout_mask.yaml" download>YAML 다운로드</a>
+    </div>
+    <section class="map-upload">
+      <h2>지도 교체</h2>
+      <p class="zone-help">지도를 교체하면 기존 구역과 station 좌표가 새 지도와 맞지 않을 수 있습니다. 적용 후 위치를 다시 확인하세요.</p>
+      <dl class="map-meta-list" id="mapMetaList">
+        <dt>width</dt><dd>-</dd>
+        <dt>height</dt><dd>-</dd>
+        <dt>resolution</dt><dd>-</dd>
+        <dt>origin</dt><dd>-</dd>
+      </dl>
+      <label class="file-field">map.pgm <input id="mapPgmInput" type="file" accept=".pgm"></label>
+      <label class="file-field">map.yaml <input id="mapYamlInput" type="file" accept=".yaml,.yml"></label>
+      <button class="ack-btn" id="uploadMapBtn" type="button">지도 업로드</button>
+      <p class="zone-help" id="uploadMessage"></p>
+    </section>
+  </aside>
+</main>
+
+<script src="/map.js"></script>
+<script>
+  const $ = (id) => document.getElementById(id);
+
+  const mapView = new MapView($("mapCanvas"));
+  let zones = [];
+  let draftPoints = [];
+  let drawing = false;
+  let dirty = false;
+
+  const saveStatusEl = $("saveStatus");
+  const zoneListEl = $("zoneList");
+  const drawHintEl = $("drawHint");
+  const startDrawBtn = $("startDrawBtn");
+  const finishDrawBtn = $("finishDrawBtn");
+  const cancelDrawBtn = $("cancelDrawBtn");
+  const saveZonesBtn = $("saveZonesBtn");
+  const mapMetaListEl = $("mapMetaList");
+  const mapPgmInput = $("mapPgmInput");
+  const mapYamlInput = $("mapYamlInput");
+  const uploadMapBtn = $("uploadMapBtn");
+  const uploadMessageEl = $("uploadMessage");
+
+  function setSaveStatus(kind, text) {
+    saveStatusEl.className = `status-pill status-${kind}`;
+    saveStatusEl.querySelector(".status-text").textContent = text;
+  }
+
+  function makeZoneId() {
+    return `keepout-${Date.now().toString(36)}`;
+  }
+
+  function updateMapInfo() {
+    const meta = mapView.meta;
+    const values = meta
+      ? [meta.width, meta.height, `${meta.resolution} m/px`, `[${meta.origin_x}, ${meta.origin_y}, 0.0]`]
+      : ["-", "-", "-", "-"];
+    mapMetaListEl.querySelectorAll("dd").forEach((dd, index) => {
+      dd.textContent = values[index];
+    });
+  }
+
+  function displayZones() {
+    const previewZones = drawing && draftPoints.length
+      ? [...zones, { id: "__draft", name: "작성 중", kind: "polygon", severity: "danger", points: draftPoints }]
+      : zones;
+    mapView.setZones(previewZones);
+
+    zoneListEl.innerHTML = "";
+    if (!zones.length) {
+      const empty = document.createElement("div");
+      empty.className = "alert-empty";
+      empty.textContent = "저장된 금지구역이 없습니다";
+      zoneListEl.appendChild(empty);
+      return;
+    }
+
+    for (const zone of zones) {
+      const item = document.createElement("div");
+      item.className = "zone-item";
+      const info = document.createElement("div");
+      const title = document.createElement("strong");
+      title.textContent = zone.name;
+      const meta = document.createElement("span");
+      meta.textContent = `${zone.points.length}점 polygon`;
+      info.append(title, meta);
+
+      const del = document.createElement("button");
+      del.type = "button";
+      del.textContent = "삭제";
+      del.addEventListener("click", () => {
+        zones = zones.filter((z) => z.id !== zone.id);
+        dirty = true;
+        setSaveStatus("connecting", "저장 필요");
+        displayZones();
+      });
+      item.append(info, del);
+      zoneListEl.appendChild(item);
+    }
+  }
+
+  function setDrawing(enabled) {
+    drawing = enabled;
+    startDrawBtn.disabled = enabled;
+    finishDrawBtn.disabled = !enabled || draftPoints.length < 3;
+    cancelDrawBtn.disabled = !enabled;
+    drawHintEl.textContent = enabled
+      ? `${draftPoints.length}개 점 선택됨. 지도 위를 클릭해 꼭짓점을 추가하세요.`
+      : "금지구역 추가를 누른 뒤 지도 위 점을 3개 이상 찍고 완료하세요.";
+    displayZones();
+  }
+
+  async function loadZones() {
+    const res = await fetch("/api/zones");
+    if (!res.ok) throw new Error("zones load failed");
+    zones = await res.json();
+    dirty = false;
+    setSaveStatus("online", "불러옴");
+    displayZones();
+  }
+
+  async function saveZones() {
+    const res = await fetch("/api/zones", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(zones),
+    });
+    if (!res.ok) throw new Error(await res.text());
+    const data = await res.json();
+    zones = data.zones || [];
+    dirty = false;
+    setSaveStatus("online", "저장됨");
+    displayZones();
+  }
+
+  async function uploadMap() {
+    if (!mapPgmInput.files.length || !mapYamlInput.files.length) {
+      uploadMessageEl.textContent = "map.pgm과 map.yaml을 모두 선택하세요.";
+      return;
+    }
+    const form = new FormData();
+    form.append("map_pgm", mapPgmInput.files[0]);
+    form.append("map_yaml", mapYamlInput.files[0]);
+    const res = await fetch("/api/map/upload", { method: "POST", body: form });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || "지도 업로드 실패");
+    mapView.setMapMeta(data.map);
+    await mapView.reloadImage();
+    mapView.fitToView();
+    updateMapInfo();
+    uploadMessageEl.textContent = "지도 교체 완료. 구역과 station 위치를 다시 확인하세요.";
+  }
+
+  startDrawBtn.addEventListener("click", () => {
+    draftPoints = [];
+    setDrawing(true);
+  });
+
+  finishDrawBtn.addEventListener("click", () => {
+    if (draftPoints.length < 3) return;
+    zones.push({
+      id: makeZoneId(),
+      name: `금지구역 ${zones.length + 1}`,
+      note: "Nav2 keepout",
+      kind: "polygon",
+      severity: "danger",
+      points: draftPoints,
+    });
+    draftPoints = [];
+    dirty = true;
+    setSaveStatus("connecting", "저장 필요");
+    setDrawing(false);
+  });
+
+  cancelDrawBtn.addEventListener("click", () => {
+    draftPoints = [];
+    setDrawing(false);
+  });
+
+  saveZonesBtn.addEventListener("click", async () => {
+    try {
+      setSaveStatus("connecting", "저장 중");
+      await saveZones();
+    } catch (err) {
+      console.error(err);
+      setSaveStatus("offline", "저장 실패");
+    }
+  });
+
+  uploadMapBtn.addEventListener("click", async () => {
+    try {
+      uploadMapBtn.disabled = true;
+      uploadMessageEl.textContent = "지도 업로드 중";
+      await uploadMap();
+    } catch (err) {
+      console.error(err);
+      uploadMessageEl.textContent = err.message || "지도 업로드 실패";
+    } finally {
+      uploadMapBtn.disabled = false;
+    }
+  });
+
+  $("fitMapBtn").addEventListener("click", () => mapView.fitToView());
+
+  $("mapCanvas").addEventListener("click", (event) => {
+    if (!drawing || !mapView.meta) return;
+    const rect = event.currentTarget.getBoundingClientRect();
+    const sx = event.clientX - rect.left;
+    const sy = event.clientY - rect.top;
+    const [x, y] = mapView.screenToWorld(sx, sy);
+    draftPoints.push([Number(x.toFixed(4)), Number(y.toFixed(4))]);
+    finishDrawBtn.disabled = draftPoints.length < 3;
+    drawHintEl.textContent = `${draftPoints.length}개 점 선택됨.`;
+    displayZones();
+  });
+
+  window.addEventListener("beforeunload", (event) => {
+    if (!dirty) return;
+    event.preventDefault();
+    event.returnValue = "";
+  });
+
+  (async () => {
+    try {
+      await mapView.loadMap();
+      updateMapInfo();
+      await loadZones();
+    } catch (err) {
+      console.error(err);
+      setSaveStatus("offline", "로드 실패");
+    }
+  })();
+</script>
+</body>
+</html>

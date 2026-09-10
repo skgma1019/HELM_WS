@@ -29,6 +29,10 @@
     <div class="tile-value" id="tile24h">0</div>
   </div>
   <div class="tile">
+    <div class="tile-label">오늘 점검 지점</div>
+    <div class="tile-value" id="tileStations">0/3</div>
+  </div>
+  <div class="tile">
     <div class="tile-label">로봇 상태</div>
     <div class="tile-value" id="tileRobotState">-</div>
   </div>
@@ -50,7 +54,13 @@
   </div>
 
   <div class="alerts">
-    <h2>실시간 알림</h2>
+    <div class="alerts-header">
+      <h2>실시간 알림</h2>
+      <label class="filter-toggle">
+        <input type="checkbox" id="showAllToggle" />
+        정상 방문 포함
+      </label>
+    </div>
     <div class="alert-list" id="alertList"></div>
   </div>
 </section>
@@ -72,12 +82,7 @@
 <script>
   const $ = (id) => document.getElementById(id);
 
-  const TYPE_LABELS = {
-    no_helmet: "안전모 미착용",
-    zone_intrusion: "위험구역 침입",
-    robot_estop: "로봇 비상정지",
-    low_battery: "배터리 부족",
-  };
+  const TOTAL_STATIONS = 3;
   const SEVERITY_LABELS = { danger: "위험", caution: "주의", info: "정보" };
   const SEVERITY_BADGE_CLASS = { danger: "badge-danger", caution: "badge-caution", info: "badge-info" };
   const STATE_LABELS = { patrolling: "순찰 중", idle: "대기", estop: "비상정지", charging: "충전 중" };
@@ -91,6 +96,8 @@
   const robotStatusEl = $("robotStatus");
   const tileUnackedEl = $("tileUnacked");
   const tile24hEl = $("tile24h");
+  const tileStationsEl = $("tileStations");
+  const showAllToggleEl = $("showAllToggle");
   const tileRobotStateEl = $("tileRobotState");
   const tileBatteryEl = $("tileBattery");
   const modalBackdropEl = $("modalBackdrop");
@@ -108,12 +115,22 @@
   const robots = {}; // robot_id -> {..., lastSeenAt}
   let primaryRobotId = null;
   let currentModalId = null;
+  let showAllEvents = false;
+  let latestEventId = null;
+  let latestEventAt = 0;
   let reconnectDelayMs = INITIAL_RECONNECT_DELAY_MS;
 
   // ---------- 포맷 헬퍼 ----------
 
   function fmtNum(n) {
-    return typeof n === "number" ? n.toFixed(2) : "-";
+    return typeof n === "number" && Number.isFinite(n) ? n.toFixed(2) : "-";
+  }
+  function stationLabel(ev) {
+    return `${ev.station_name || "점검 지점"} (${ev.station_id || "-"})`;
+  }
+  function visionRatio(ev) {
+    return ev.vision_score != null && ev.vision_threshold > 0
+      ? fmtNum(ev.vision_score / ev.vision_threshold) : "-";
   }
   function formatTime(ts) {
     return new Date(ts * 1000).toLocaleTimeString("ko-KR", { hour12: false });
@@ -143,7 +160,7 @@
     if (event.image_path) {
       const img = document.createElement("img");
       img.src = event.image_path;
-      img.alt = TYPE_LABELS[event.type] || event.type;
+      img.alt = stationLabel(event);
       thumb.appendChild(img);
     } else {
       thumb.classList.add("no-photo");
@@ -154,16 +171,21 @@
     info.className = "alert-info";
     const title = document.createElement("div");
     title.className = "alert-type";
-    title.textContent = TYPE_LABELS[event.type] || event.type;
+    title.textContent = event.station_name || "점검 지점";
+    const stationId = document.createElement("small");
+    stationId.className = "station-id";
+    stationId.textContent = ` (${event.station_id || "-"})`;
+    title.appendChild(stationId);
     const meta = document.createElement("div");
     meta.className = "alert-meta";
-    meta.textContent = `${formatTime(event.ts)} · (${fmtNum(event.x)}, ${fmtNum(event.y)})`;
+    meta.textContent = `${formatTime(event.ts)} · vision 비율 ${visionRatio(event)} · (${fmtNum(event.x)}, ${fmtNum(event.y)})`;
     info.appendChild(title);
     info.appendChild(meta);
 
     const badges = document.createElement("div");
     badges.className = "alert-badges";
     badges.appendChild(severityBadge(event.severity));
+    badges.appendChild(makeBadge(event.verdict, "badge-acked"));
     if (event.delayed) badges.appendChild(makeBadge("지연수신", "badge-delayed"));
     if (event.acked) badges.appendChild(makeBadge("✓ 확인됨", "badge-acked"));
 
@@ -178,18 +200,26 @@
     return card;
   }
 
-  function renderEmptyState() {
-    if (eventOrder.length > 0) return;
-    const empty = document.createElement("div");
-    empty.className = "alert-empty";
-    empty.id = "alertEmpty";
-    empty.textContent = "아직 이상상황이 없습니다";
-    alertListEl.appendChild(empty);
+  function renderAlertList() {
+    alertListEl.replaceChildren();
+    const visible = eventOrder.filter((id) => showAllEvents || eventsById.get(id).verdict === "ANOMALY");
+    for (const id of visible) {
+      alertListEl.appendChild(renderCard(eventsById.get(id), {
+        isNew: id === latestEventId && Date.now() - latestEventAt < 2000,
+      }));
+    }
+    if (visible.length === 0) {
+      const empty = document.createElement("div");
+      empty.className = "alert-empty";
+      empty.textContent = showAllEvents ? "아직 점검 이력이 없습니다" : "아직 이상상황이 없습니다";
+      alertListEl.appendChild(empty);
+    }
   }
-  function removeEmptyState() {
-    const el = $("alertEmpty");
-    if (el) el.remove();
-  }
+
+  showAllToggleEl.addEventListener("change", () => {
+    showAllEvents = showAllToggleEl.checked;
+    renderAlertList();
+  });
 
   // ---------- 타일 / 상태 표시 ----------
 
@@ -197,13 +227,19 @@
     let unacked = 0;
     let last24h = 0;
     const nowSec = Date.now() / 1000;
+    const today = new Date().toDateString();
+    const visited = new Set();
     for (const id of eventOrder) {
       const ev = eventsById.get(id);
-      if (!ev.acked) unacked++;
-      if (nowSec - ev.ts <= 86400) last24h++;
+      if (ev.verdict === "ANOMALY") {
+        if (!ev.acked) unacked++;
+        if (nowSec - ev.ts >= 0 && nowSec - ev.ts <= 86400) last24h++;
+      }
+      if (ev.station_id && new Date(ev.ts * 1000).toDateString() === today) visited.add(ev.station_id);
     }
     tileUnackedEl.textContent = unacked;
     tile24hEl.textContent = last24h;
+    tileStationsEl.textContent = `${visited.size}/${TOTAL_STATIONS}`;
   }
 
   function setServerStatus(state, text) {
@@ -235,14 +271,13 @@
   function handleSnapshot(msg) {
     eventsById.clear();
     eventOrder.length = 0;
-    alertListEl.innerHTML = "";
+    latestEventId = null;
 
     for (const ev of msg.events || []) {
       eventsById.set(ev.id, ev);
       eventOrder.push(ev.id);
-      alertListEl.appendChild(renderCard(ev));
     }
-    renderEmptyState();
+    renderAlertList();
 
     for (const r of msg.robots || []) {
       robots[r.robot_id] = { ...r, lastSeenAt: r.last_seen ? r.last_seen * 1000 : Date.now() };
@@ -250,17 +285,19 @@
       mapView.updateRobot(r.robot_id, { x: r.x, y: r.y, yaw: r.yaw });
     }
 
+    mapView.setZones(msg.zones || []);
     mapView.setEvents([...eventsById.values()]);
     updateTiles();
     updateRobotStatus();
   }
 
   function handleNewEvent(msg) {
-    removeEmptyState();
     const ev = { ...msg.event, delayed: msg.delayed };
+    if (!eventsById.has(ev.id)) eventOrder.unshift(ev.id);
     eventsById.set(ev.id, ev);
-    eventOrder.unshift(ev.id);
-    alertListEl.prepend(renderCard(ev, { isNew: true }));
+    latestEventId = ev.id;
+    latestEventAt = Date.now();
+    renderAlertList();
     mapView.setEvents([...eventsById.values()]);
     updateTiles();
   }
@@ -270,8 +307,7 @@
     if (!ev) return;
     ev.acked = true;
     ev.acked_by = ackedBy;
-    const card = alertListEl.querySelector(`[data-id="${CSS.escape(id)}"]`);
-    if (card) card.replaceWith(renderCard(ev));
+    renderAlertList();
     mapView.setEvents([...eventsById.values()]);
     updateTiles();
     if (currentModalId === id) openModal(id);
@@ -291,6 +327,10 @@
     mapView.reloadImage();
   }
 
+  function handleZonesUpdated(msg) {
+    mapView.setZones(msg.zones || []);
+  }
+
   function dispatchMessage(msg) {
     switch (msg.type) {
       case "snapshot":
@@ -308,8 +348,11 @@
       case "map_updated":
         handleMapUpdated(msg);
         break;
+      case "zones_updated":
+        handleZonesUpdated(msg);
+        break;
       default:
-        break; // robot_online/offline, zones_updated 등은 다음 단계에서
+        break; // robot_online/offline 등은 다음 단계에서
     }
   }
 
@@ -356,14 +399,14 @@
     if (!ev) return;
     currentModalId = id;
 
-    modalTitleEl.textContent = TYPE_LABELS[ev.type] || ev.type;
+    modalTitleEl.textContent = stationLabel(ev);
 
     modalPhotoEl.innerHTML = "";
     modalPhotoEl.classList.remove("no-photo");
     if (ev.image_path) {
       const img = document.createElement("img");
       img.src = ev.image_path;
-      img.alt = TYPE_LABELS[ev.type] || ev.type;
+      img.alt = stationLabel(ev);
       modalPhotoEl.appendChild(img);
     } else {
       modalPhotoEl.classList.add("no-photo");
@@ -378,7 +421,12 @@
     const delaySec = Math.max(0, ev.received_at - ev.ts);
     modalDetailsEl.innerHTML = "";
     addDetailRow("좌표", `(${fmtNum(ev.x)}, ${fmtNum(ev.y)})`);
-    addDetailRow("신뢰도", ev.confidence != null ? `${Math.round(ev.confidence * 100)}%` : "-");
+    addDetailRow("판정", ev.verdict);
+    addDetailRow("위치 오차", ev.pose_pos_error_m != null ? `${fmtNum(ev.pose_pos_error_m * 100)} cm` : "-");
+    addDetailRow("방향 오차", ev.pose_yaw_error_rad != null ? `${fmtNum(ev.pose_yaw_error_rad * 180 / Math.PI)}°` : "-");
+    addDetailRow("vision 점수 / 임계값", `${fmtNum(ev.vision_score)} / ${fmtNum(ev.vision_threshold)} (비율 ${visionRatio(ev)})`);
+    addDetailRow("thermal 온도 / 임계값", `${fmtNum(ev.thermal_max_temp_c)} / ${fmtNum(ev.thermal_threshold_c)} °C`);
+    addDetailRow("이상 채널", (ev.triggered_by || []).join(", ") || "없음");
     addDetailRow("로봇 ID", ev.robot_id || "-");
     addDetailRow("이벤트 ID", ev.id);
     addDetailRow("발생 시각", formatDateTime(ev.ts));
@@ -427,6 +475,7 @@
   mapView.loadMap();
   connectDashboardWs();
   setInterval(updateRobotStatus, 3000);
+  setInterval(updateTiles, 1000);
 </script>
 </body>
 </html>

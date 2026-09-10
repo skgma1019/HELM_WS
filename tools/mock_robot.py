@@ -1,7 +1,11 @@
-"""하드웨어 대신 쓰는 가짜 로봇. 설계서 6-1 규격을 그대로 지킨다.
+"""하드웨어 대신 쓰는 가짜 로봇. CLAUDE.md 연동 규격을 그대로 지킨다.
 
 진짜 로봇이 오면 이 파일만 ROS2 노드로 교체하면 된다.
 서버(app/)는 이 스크립트가 보내는 메시지 포맷만 보고 동작하므로 한 줄도 안 바뀐다.
+
+탐지 방식(PatchCore 기반 이상탐지)이 station 단위 판정으로 바뀌면서, 이 스크립트도
+"사각형 왕복 순찰 + 무작위 이벤트"가 아니라 "지정된 지점을 순서대로 방문 -> 정지 ->
+촬영/판정 -> 다음 지점" 구조로 바뀌었다.
 """
 from __future__ import annotations
 
@@ -15,7 +19,6 @@ import math
 import os
 import random
 import time
-import uuid
 from dataclasses import dataclass, field
 
 import websockets
@@ -26,28 +29,37 @@ logger = logging.getLogger("mock_robot")
 
 TELEMETRY_HZ = 2.0
 PATROL_SPEED_MPS = 0.6
-EVENT_CHECK_INTERVAL_SEC = 1.0
-NO_HELMET_PROB = 0.05  # 위 간격마다 굴리는 확률
 RECONNECT_DELAY_SEC = 3.0
+ARRIVAL_TOLERANCE_M = 0.05
 
-# 순찰 경로: 사각형 왕복. make_fake_map.py가 만드는 지도 범위 안에 들어오게 잡았다
-PATROL_PATH = [
-    (1.0, 1.0),
-    (8.0, 1.0),
-    (8.0, 6.0),
-    (1.0, 6.0),
+IMAGE_W, IMAGE_H = 640, 480
+VISION_THRESHOLD = 0.5
+THERMAL_THRESHOLD_C = 50.0
+DEFAULT_ANOMALY_PROB = 0.35  # 방문마다 이상이 나올 확률 (데모용 — 실제 설비는 훨씬 낮다)
+DEFAULT_INSPECTION_PAUSE_SEC = 2.0  # 도착 후 촬영/판정하는 동안의 정지 시간
+
+# 순찰 지점 3곳. make_fake_map.py가 만드는 지도 범위 안에 들어오게 잡았다
+STATIONS = [
+    {"id": "A", "name": "1번 설비 전면", "x": 1.0, "y": 1.0, "yaw": 0.0},
+    {"id": "B", "name": "2번 설비 측면", "x": 8.0, "y": 1.0, "yaw": math.pi / 2},
+    {"id": "C", "name": "적재장 통로", "x": 8.0, "y": 6.0, "yaw": math.pi},
 ]
 
 
-def make_dummy_jpeg() -> bytes:
-    """진짜 카메라가 없으니 그 자리에서 안전모 미착용처럼 보이는 더미 이미지를 만든다."""
-    img = Image.new("RGB", (640, 480), color=(40, 40, 40))
+def make_inspection_jpeg(is_anomaly: bool, regions: list[dict], score: float, max_temp: float) -> bytes:
+    """실제로는 PatchCore가 사각형을 그려 보낸다 — 그 자리를 흉내낸 더미 이미지."""
+    img = Image.new("RGB", (IMAGE_W, IMAGE_H), color=(45, 48, 54))
     draw = ImageDraw.Draw(img)
-    draw.rectangle([180, 120, 460, 360], outline=(255, 0, 0), width=4)
-    draw.ellipse([280, 140, 360, 220], outline=(255, 200, 0), width=3)
-    draw.text((190, 370), f"MOCK no_helmet {time.strftime('%H:%M:%S')}", fill=(255, 255, 0))
+    draw.rectangle([40, 40, IMAGE_W - 40, IMAGE_H - 40], outline=(90, 96, 105), width=2)  # 설비 윤곽 흉내
+    if is_anomaly:
+        for region in regions:
+            x, y, w, h = region["bbox"]
+            draw.rectangle([x, y, x + w, y + h], outline=(255, 92, 92), width=3)
+        draw.text((20, 15), f"ANOMALY score={score:.2f} temp={max_temp:.1f}C", fill=(255, 92, 92))
+    else:
+        draw.text((20, 15), f"NORMAL score={score:.2f} temp={max_temp:.1f}C", fill=(110, 220, 140))
     buf = io.BytesIO()
-    img.save(buf, format="JPEG", quality=70)
+    img.save(buf, format="JPEG", quality=75)
     return buf.getvalue()
 
 
@@ -58,55 +70,113 @@ class RobotSim:
     port: int
     token: str
     scheme: str = "ws"
-    path_index: int = 0
+    anomaly_prob: float = DEFAULT_ANOMALY_PROB
+    inspection_pause_sec: float = DEFAULT_INSPECTION_PAUSE_SEC
     yaw: float = 0.0
     battery: float = 100.0
+    state: str = "patrolling"
     connected: bool = False
     ws: object | None = None
     pending: list[dict] = field(default_factory=list)  # 서버 ack를 못 받은 이벤트들 (오프라인 버퍼)
+    station_seq: dict = field(default_factory=dict)  # station_id -> 지금까지 방문 횟수
 
     def __post_init__(self) -> None:
-        self.x, self.y = PATROL_PATH[0]
+        self.x, self.y = STATIONS[0]["x"], STATIONS[0]["y"]
+        self.target_x, self.target_y = self.x, self.y
 
     @property
     def url(self) -> str:
         return f"{self.scheme}://{self.host}:{self.port}/ws/robot?token={self.token}"
 
-    def step_position(self, dt: float) -> None:
-        target = PATROL_PATH[(self.path_index + 1) % len(PATROL_PATH)]
-        dx = target[0] - self.x
-        dy = target[1] - self.y
+    def set_target(self, x: float, y: float) -> None:
+        self.target_x = x
+        self.target_y = y
+
+    def at_target(self) -> bool:
+        return math.hypot(self.target_x - self.x, self.target_y - self.y) < ARRIVAL_TOLERANCE_M
+
+    def step_toward_target(self, dt: float) -> None:
+        dx = self.target_x - self.x
+        dy = self.target_y - self.y
         dist = math.hypot(dx, dy)
         step = PATROL_SPEED_MPS * dt
         if dist <= step:
-            self.x, self.y = target
-            self.path_index = (self.path_index + 1) % len(PATROL_PATH)
+            self.x, self.y = self.target_x, self.target_y
         else:
             self.yaw = math.atan2(dy, dx)
             self.x += (dx / dist) * step
             self.y += (dy / dist) * step
-        # 순찰 중엔 배터리가 천천히 줄어든다 — telemetry 필드를 그럴싸하게 채우는 용도
-        self.battery = max(0.0, self.battery - 0.02 * dt)
+        if self.state == "patrolling":
+            self.battery = max(0.0, self.battery - 0.02 * dt)
 
-    def make_event(self) -> dict:
+    def make_inspection_event(self, station: dict) -> dict:
+        """지점에 도착해 정지한 뒤 촬영/판정한 결과 하나. verdict는 ANOMALY/NORMAL 둘 다 나올 수 있다."""
+        attempt_anomaly = random.random() < self.anomaly_prob
+        vision_anomaly = attempt_anomaly and random.random() < 0.7
+        thermal_anomaly = attempt_anomaly and random.random() < 0.35
+        if attempt_anomaly and not vision_anomaly and not thermal_anomaly:
+            vision_anomaly = True  # 이상을 시도했으면 최소 한 채널은 터지게 보정
+
+        if vision_anomaly:
+            score = round(VISION_THRESHOLD * random.uniform(1.0, 1.6), 3)
+            w, h = random.randint(60, 140), random.randint(60, 140)
+            bx = random.randint(20, IMAGE_W - w - 20)
+            by = random.randint(20, IMAGE_H - h - 20)
+            regions = [{"bbox": [bx, by, w, h], "area_px": w * h}]
+        else:
+            score = round(VISION_THRESHOLD * random.uniform(0.3, 0.95), 3)
+            regions = []
+
+        max_temp = round(
+            THERMAL_THRESHOLD_C + random.uniform(2, 20) if thermal_anomaly else random.uniform(28, 45), 1
+        )
+
+        verdict = "ANOMALY" if (vision_anomaly or thermal_anomaly) else "NORMAL"
+        triggered_by = [name for name, hit in (("vision", vision_anomaly), ("thermal", thermal_anomaly)) if hit]
+
+        seq = self.station_seq.get(station["id"], 0) + 1
+        self.station_seq[station["id"]] = seq
+        event_id = f"{time.strftime('%Y%m%d-%H%M')}-{station['id']}-{seq:03d}"
+
+        image_bytes = make_inspection_jpeg(verdict == "ANOMALY", regions, score, max_temp)
+
         return {
-            "id": str(uuid.uuid4()),
+            "id": event_id,
             "robot_id": self.robot_id,
-            "type": "no_helmet",
-            "severity": "danger",
+            "station_id": station["id"],
+            "station_name": station["name"],
+            "seq": seq,
             "ts": time.time(),
-            "x": round(self.x, 2),
-            "y": round(self.y, 2),
-            "confidence": round(random.uniform(0.7, 0.98), 2),
-            "image_b64": base64.b64encode(make_dummy_jpeg()).decode("ascii"),
+            "x": round(self.x, 3),
+            "y": round(self.y, 3),
+            "yaw": round(self.yaw, 3),
+            "pose_error": {
+                "pos_m": round(random.uniform(0.0, 0.05), 4),
+                "yaw_rad": round(random.uniform(0.0, 0.03), 4),
+            },
+            "verdict": verdict,
+            "triggered_by": triggered_by,
+            "vision": {
+                "is_anomaly": vision_anomaly,
+                "score": score,
+                "threshold": VISION_THRESHOLD,
+                "regions": regions,
+            },
+            "thermal": {
+                "is_anomaly": thermal_anomaly,
+                "max_temp_c": max_temp,
+                "threshold_c": THERMAL_THRESHOLD_C,
+            },
+            "image_b64": base64.b64encode(image_bytes).decode("ascii"),
         }
 
 
 async def telemetry_loop(sim: RobotSim) -> None:
+    """이동 + telemetry 송신. patrol_loop가 정한 target을 향해 실제로 걷는 것도 여기서 한다."""
     dt = 1 / TELEMETRY_HZ
     while True:
         await asyncio.sleep(dt)
-        sim.step_position(dt)
+        sim.step_toward_target(dt)
         if not (sim.connected and sim.ws is not None):
             continue
         message = {
@@ -116,7 +186,7 @@ async def telemetry_loop(sim: RobotSim) -> None:
             "y": round(sim.y, 3),
             "yaw": round(sim.yaw, 3),
             "battery": round(sim.battery, 1),
-            "state": "patrolling",
+            "state": sim.state,
         }
         try:
             await sim.ws.send(json.dumps(message))
@@ -133,15 +203,34 @@ async def send_event(sim: RobotSim, event: dict) -> None:
         pass  # 재연결 시 backlog로 다시 시도된다
 
 
-async def event_loop(sim: RobotSim) -> None:
+async def patrol_loop(sim: RobotSim) -> None:
+    """지점을 순서대로 방문: 이동 -> 도착 -> 정지하고 촬영/판정 -> 다음 지점."""
+    station_index = 0
     while True:
-        await asyncio.sleep(EVENT_CHECK_INTERVAL_SEC)
-        if random.random() >= NO_HELMET_PROB:
-            continue
-        event = sim.make_event()
+        station = STATIONS[station_index]
+        sim.state = "patrolling"
+        sim.set_target(station["x"], station["y"])
+        while not sim.at_target():
+            await asyncio.sleep(0.2)
+
+        sim.yaw = station["yaw"]  # 등록된 방향으로 정렬하고 정지
+        sim.state = "idle"
+        await asyncio.sleep(sim.inspection_pause_sec)
+
+        event = sim.make_inspection_event(station)
         sim.pending.append(event)
-        logger.info("no_helmet 이벤트 생성 id=%s (버퍼 %d건)", event["id"][:8], len(sim.pending))
+        logger.info(
+            "%s(%s) 방문#%d — verdict=%s triggered_by=%s (버퍼 %d건)",
+            station["name"],
+            station["id"],
+            event["seq"],
+            event["verdict"],
+            event["triggered_by"],
+            len(sim.pending),
+        )
         await send_event(sim, event)
+
+        station_index = (station_index + 1) % len(STATIONS)
 
 
 async def resend_backlog(sim: RobotSim) -> None:
@@ -164,7 +253,7 @@ async def receive_loop(sim: RobotSim, ws) -> None:
             if len(sim.pending) < before:
                 logger.info(
                     "ack 수신 id=%s duplicate=%s (버퍼 %d건 남음)",
-                    str(event_id)[:8],
+                    event_id,
                     message.get("duplicate"),
                     len(sim.pending),
                 )
@@ -219,10 +308,12 @@ async def run(args: argparse.Namespace) -> None:
         port=args.port,
         token=args.token,
         scheme=args.scheme,
+        anomaly_prob=args.anomaly_prob,
+        inspection_pause_sec=args.inspection_pause,
     )
     background = [
         asyncio.create_task(telemetry_loop(sim)),
-        asyncio.create_task(event_loop(sim)),
+        asyncio.create_task(patrol_loop(sim)),
     ]
     try:
         await connection_loop(sim, args)
@@ -241,6 +332,18 @@ def parse_args() -> argparse.Namespace:
         "--token",
         default=os.environ.get("HELM_ROBOT_TOKEN", ""),
         help="기본값은 환경변수 HELM_ROBOT_TOKEN",
+    )
+    parser.add_argument(
+        "--anomaly-prob",
+        type=float,
+        default=DEFAULT_ANOMALY_PROB,
+        help=f"지점 방문마다 이상이 나올 확률, 기본 {DEFAULT_ANOMALY_PROB}",
+    )
+    parser.add_argument(
+        "--inspection-pause",
+        type=float,
+        default=DEFAULT_INSPECTION_PAUSE_SEC,
+        help=f"도착 후 촬영/판정하는 동안 정지 시간(초), 기본 {DEFAULT_INSPECTION_PAUSE_SEC}",
     )
     parser.add_argument(
         "--offline",

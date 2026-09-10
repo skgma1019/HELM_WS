@@ -99,7 +99,7 @@ body {
 
 .tiles {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  grid-template-columns: repeat(5, 1fr);
   gap: 12px;
   padding: 16px 20px;
 }
@@ -178,6 +178,20 @@ body {
   background: var(--border);
 }
 
+.nav-link {
+  color: var(--text);
+  font-size: 12px;
+  text-decoration: none;
+  padding: 5px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+}
+
+.nav-link:hover {
+  background: var(--border);
+}
+
 .map-canvas-wrap {
   flex: 1;
   position: relative;
@@ -236,6 +250,26 @@ body {
   flex-direction: column;
   gap: 8px;
 }
+
+.alerts-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+.alerts-header h2 { margin: 0; }
+.filter-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+.filter-toggle input { accent-color: var(--accent); }
+.station-id { color: var(--text-muted); font-weight: 400; }
 
 .alert-empty {
   color: var(--text-muted);
@@ -490,4 +524,184 @@ body {
   color: var(--text-muted);
   border-color: var(--border);
   cursor: default;
+}
+
+/* ---------- 구역 편집기 ---------- */
+
+.zone-editor {
+  display: flex;
+  gap: 16px;
+  padding: 16px 20px 20px;
+  height: calc(100vh - 58px);
+  min-height: 520px;
+}
+
+.zone-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.zone-toolbar .fit-btn:disabled {
+  color: var(--text-muted);
+  cursor: default;
+  background: var(--surface);
+}
+
+.zone-sidebar {
+  width: 320px;
+  min-width: 280px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.zone-sidebar-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.zone-sidebar-header h2 {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--text-muted);
+}
+
+.zone-sidebar-header .ack-btn {
+  width: auto;
+  padding: 7px 12px;
+}
+
+.zone-help {
+  margin: 0 0 12px;
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.zone-list {
+  flex: 1;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-height: 0;
+}
+
+.zone-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-2);
+}
+
+.zone-item strong {
+  display: block;
+  font-size: 13px;
+}
+
+.zone-item span {
+  display: block;
+  margin-top: 2px;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.zone-item button {
+  flex: none;
+  padding: 5px 9px;
+  border: 1px solid var(--danger);
+  border-radius: 6px;
+  color: var(--danger);
+  background: transparent;
+  cursor: pointer;
+}
+
+.zone-item button:hover {
+  background: rgba(255, 92, 92, 0.12);
+}
+
+.zone-downloads {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.zone-downloads .fit-btn {
+  text-align: center;
+  text-decoration: none;
+}
+
+.map-upload {
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border);
+}
+
+.map-upload h2 {
+  margin: 0 0 8px;
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--text-muted);
+}
+
+.map-meta-list {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 5px 10px;
+  margin: 0 0 12px;
+  padding: 10px;
+  border-radius: 8px;
+  background: var(--surface-2);
+}
+
+.map-meta-list dt {
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.map-meta-list dd {
+  margin: 0;
+  font-size: 12px;
+  word-break: break-all;
+}
+
+.file-field {
+  display: grid;
+  gap: 5px;
+  margin-bottom: 10px;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.file-field input {
+  color: var(--text);
+  font-size: 12px;
+}
+
+@media (max-width: 900px) {
+  .zone-editor {
+    flex-direction: column;
+    height: auto;
+  }
+  .zone-editor .map-panel {
+    height: 420px;
+  }
+  .zone-sidebar {
+    width: auto;
+  }
 }
