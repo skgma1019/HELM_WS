@@ -42,6 +42,20 @@
       <a class="fit-btn" href="/api/nav2/keepout_mask.pgm" download>PGM 다운로드</a>
       <a class="fit-btn" href="/api/nav2/keepout_mask.yaml" download>YAML 다운로드</a>
     </div>
+    <section class="map-upload">
+      <h2>지도 교체</h2>
+      <p class="zone-help">지도를 교체하면 기존 구역과 station 좌표가 새 지도와 맞지 않을 수 있습니다. 적용 후 위치를 다시 확인하세요.</p>
+      <dl class="map-meta-list" id="mapMetaList">
+        <dt>width</dt><dd>-</dd>
+        <dt>height</dt><dd>-</dd>
+        <dt>resolution</dt><dd>-</dd>
+        <dt>origin</dt><dd>-</dd>
+      </dl>
+      <label class="file-field">map.pgm <input id="mapPgmInput" type="file" accept=".pgm"></label>
+      <label class="file-field">map.yaml <input id="mapYamlInput" type="file" accept=".yaml,.yml"></label>
+      <button class="ack-btn" id="uploadMapBtn" type="button">지도 업로드</button>
+      <p class="zone-help" id="uploadMessage"></p>
+    </section>
   </aside>
 </main>
 
@@ -62,6 +76,11 @@
   const finishDrawBtn = $("finishDrawBtn");
   const cancelDrawBtn = $("cancelDrawBtn");
   const saveZonesBtn = $("saveZonesBtn");
+  const mapMetaListEl = $("mapMetaList");
+  const mapPgmInput = $("mapPgmInput");
+  const mapYamlInput = $("mapYamlInput");
+  const uploadMapBtn = $("uploadMapBtn");
+  const uploadMessageEl = $("uploadMessage");
 
   function setSaveStatus(kind, text) {
     saveStatusEl.className = `status-pill status-${kind}`;
@@ -70,6 +89,16 @@
 
   function makeZoneId() {
     return `keepout-${Date.now().toString(36)}`;
+  }
+
+  function updateMapInfo() {
+    const meta = mapView.meta;
+    const values = meta
+      ? [meta.width, meta.height, `${meta.resolution} m/px`, `[${meta.origin_x}, ${meta.origin_y}, 0.0]`]
+      : ["-", "-", "-", "-"];
+    mapMetaListEl.querySelectorAll("dd").forEach((dd, index) => {
+      dd.textContent = values[index];
+    });
   }
 
   function displayZones() {
@@ -145,6 +174,24 @@
     displayZones();
   }
 
+  async function uploadMap() {
+    if (!mapPgmInput.files.length || !mapYamlInput.files.length) {
+      uploadMessageEl.textContent = "map.pgm과 map.yaml을 모두 선택하세요.";
+      return;
+    }
+    const form = new FormData();
+    form.append("map_pgm", mapPgmInput.files[0]);
+    form.append("map_yaml", mapYamlInput.files[0]);
+    const res = await fetch("/api/map/upload", { method: "POST", body: form });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || "지도 업로드 실패");
+    mapView.setMapMeta(data.map);
+    await mapView.reloadImage();
+    mapView.fitToView();
+    updateMapInfo();
+    uploadMessageEl.textContent = "지도 교체 완료. 구역과 station 위치를 다시 확인하세요.";
+  }
+
   startDrawBtn.addEventListener("click", () => {
     draftPoints = [];
     setDrawing(true);
@@ -181,6 +228,19 @@
     }
   });
 
+  uploadMapBtn.addEventListener("click", async () => {
+    try {
+      uploadMapBtn.disabled = true;
+      uploadMessageEl.textContent = "지도 업로드 중";
+      await uploadMap();
+    } catch (err) {
+      console.error(err);
+      uploadMessageEl.textContent = err.message || "지도 업로드 실패";
+    } finally {
+      uploadMapBtn.disabled = false;
+    }
+  });
+
   $("fitMapBtn").addEventListener("click", () => mapView.fitToView());
 
   $("mapCanvas").addEventListener("click", (event) => {
@@ -204,6 +264,7 @@
   (async () => {
     try {
       await mapView.loadMap();
+      updateMapInfo();
       await loadZones();
     } catch (err) {
       console.error(err);

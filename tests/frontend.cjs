@@ -23,7 +23,14 @@ const context = {
   },
   window: {}, location: { protocol: 'https:', host: 'localhost' },
   WebSocket: class { addEventListener() {} },
-  MapView: class { loadMap() {} setEvents(events) { this.events = events; } setZones(zones) { this.zones = zones; } updateRobot() {} },
+  MapView: class {
+    loadMap() {}
+    setMapMeta(meta) { this.meta = meta; }
+    reloadImage() { this.reloadCount = (this.reloadCount || 0) + 1; }
+    setEvents(events) { this.events = events; }
+    setZones(zones) { this.zones = zones; }
+    updateRobot() {}
+  },
   setTimeout() {}, setInterval() {}, console,
 };
 vm.createContext(context);
@@ -53,6 +60,9 @@ elements.showAllToggle.listeners.change();
 assert.equal(elements.alertList.children.length, 2);
 assert.equal(run('mapView.events.length'), 4);
 assert.equal(run('Array.isArray(mapView.zones)'), true);
+run(`dispatchMessage({type:'map_updated', map:{image:'map.pgm', resolution:.2, origin_x:1, origin_y:2, width:8, height:6}})`);
+assert.equal(run('mapView.meta.image'), 'map.pgm');
+assert.equal(run('mapView.reloadCount'), 1);
 run(`handleSnapshot({events:[{id:'b',station_id:'B',verdict:'NORMAL',ts:Date.now()/1000}]})`);
 assert.equal(elements.alertList.children[0].className, 'alert-empty');
 

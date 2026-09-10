@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import io
 import json
 import logging
 import time
@@ -8,6 +9,7 @@ from dataclasses import asdict
 from pathlib import Path
 
 import yaml
+from PIL import Image
 from fastapi import (
     FastAPI,
     File,
@@ -23,7 +25,7 @@ from fastapi.responses import FileResponse
 from fastapi.responses import Response
 from fastapi.staticfiles import StaticFiles
 
-from app import config, db, geometry, nav2
+from app import config, db, geometry, map_upload, nav2
 from app.hub import hub
 
 logging.basicConfig(level=logging.INFO)
@@ -266,10 +268,15 @@ async def get_map() -> dict:
 
 
 @app.get("/api/map/image")
-async def get_map_image() -> FileResponse:
+async def get_map_image():
     meta = geometry.load_map_meta(config.MAP_DIR)
     if meta is None:
         raise HTTPException(status_code=404, detail="map not found")
+    if Path(meta.image).suffix.lower() == ".pgm":
+        with Image.open(config.MAP_DIR / meta.image) as image:
+            buffer = io.BytesIO()
+            image.convert("L").save(buffer, format="PNG")
+        return Response(content=buffer.getvalue(), media_type="image/png")
     return FileResponse(config.MAP_DIR / meta.image)
 
 
@@ -309,6 +316,36 @@ async def post_map(
     meta_dict = asdict(meta)
     await hub.broadcast({"type": "map_updated", "map": meta_dict})
     return {"map": meta_dict}
+
+
+@app.post("/api/map/upload")
+async def post_map_upload(
+    map_pgm: UploadFile = File(...),
+    map_yaml: UploadFile = File(...),
+) -> dict:
+    """SLAM 결과(map.pgm + map.yaml)를 현재 활성 지도로 교체한다."""
+    try:
+        meta_dict = map_upload.replace_active_map(
+            config.MAP_DIR,
+            pgm_bytes=await map_pgm.read(),
+            yaml_bytes=await map_yaml.read(),
+        )
+    except map_upload.MapUploadError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    await hub.broadcast({"type": "map_updated", "map": meta_dict})
+    return {
+        "ok": True,
+        "width": meta_dict["width"],
+        "height": meta_dict["height"],
+        "resolution": meta_dict["resolution"],
+        "origin": [meta_dict["origin_x"], meta_dict["origin_y"], 0.0],
+        "map": meta_dict,
+        "warnings": [
+            "지도를 교체하면 기존 구역 좌표가 새 지도와 맞지 않을 수 있습니다. 지도 교체 후 구역을 다시 확인하세요.",
+            "새 지도를 적용한 뒤 기존 station 좌표를 다시 확인해야 합니다.",
+        ],
+    }
 
 
 @app.get("/api/events")
